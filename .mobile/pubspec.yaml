@@ -1,7 +1,7 @@
-name: cactus_openai_server
-description: OpenAI-compatible API proxy server for Android phones
+name: aivr_farm_node
+description: Dedicated AI Farm worker node — earn tokens by contributing mobile compute
 publish_to: 'none'
-version: 1.1.0+2
+version: 2.0.0+1
 
 environment:
   sdk: '>=3.7.0 <4.0.0'
@@ -9,15 +9,12 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  http: ^1.1.0
-  shelf: ^1.4.1
-  shelf_router: ^1.1.4
-  network_info_plus: ^5.0.0
   cactus: ^1.3.0
   wakelock_plus: ^1.1.4
   path_provider: ^2.1.2
   uuid: ^4.3.3
   shared_preferences: ^2.2.2
+  http: ^1.1.0
 
 dev_dependencies:
   flutter_test:

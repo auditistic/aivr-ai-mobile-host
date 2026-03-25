@@ -1,129 +1,111 @@
 {
-    "schemaVersion": "1.0",
+    "schemaVersion": "2.0",
     "root": {
-        "name": "CACTUS AI",
-        "description": "Android-native local AI node with OpenAI-compatible bridge and AIVR Core mesh integration.",
-        "status": "PARTIAL",
+        "name": "AIVR FARM NODE",
+        "description": "Dedicated AI Farm worker node. Connects to farm via Cloudflare gateway, receives commands, runs inference, earns tokens.",
+        "status": "COMPLETED",
         "children": [
             {
                 "name": "CORE.LLM",
-                "description": "Local LLM inference management using CactusLM SDK.",
+                "description": "Local LLM inference using CactusLM SDK, controlled by farm commands.",
                 "status": "COMPLETED",
                 "children": [
                     {
-                        "name": "MODEL.REPOSITORY",
-                        "description": "Dynamic weight registry and local storage management.",
-                        "status": "COMPLETED",
-                        "children": [
-                            {
-                                "name": "MODEL.DOWNLOAD",
-                                "description": "Network synchronization of GGUF model weights.",
-                                "status": "COMPLETED"
-                            },
-                            {
-                                "name": "MODEL.SUPPORT_VALIDATION",
-                                "description": "Validation of Requested Model against Target Device (NPU/GPU/CPU/XPU) via PCI Device ID and Numeric Unit Identifier mapping.",
-                                "status": "COMPLETED"
-                            }
-                        ]
-                    },
-                    {
-                        "name": "MODEL.INITIALIZE",
-                        "description": "VRAM allocation and model loading sequence.",
+                        "name": "MODEL.DOWNLOAD",
+                        "description": "Farm-commanded model download with progress reporting.",
                         "status": "COMPLETED"
                     },
                     {
-                        "name": "BENCHMARK.SUITE",
-                        "description": "Automated performance auditing of all linguistic devices (CPU1, GPU1, etc.) against model weight compatibility.",
+                        "name": "MODEL.LOAD",
+                        "description": "Farm-commanded model load/unload with configurable context size.",
+                        "status": "COMPLETED"
+                    },
+                    {
+                        "name": "INFERENCE.SYNC",
+                        "description": "Non-streaming inference: farm sends messages, node returns full response + usage.",
+                        "status": "COMPLETED"
+                    },
+                    {
+                        "name": "INFERENCE.STREAM",
+                        "description": "Streaming inference: node sends token chunks back to farm via WebSocket.",
                         "status": "COMPLETED"
                     }
                 ]
             },
             {
-                "name": "BRIDGE.OPENAI",
-                "description": "Local HTTP server providing OpenAI-compatible endpoints with AIVR Core mesh integration.",
+                "name": "FARM.CONNECTION",
+                "description": "WebSocket connection to AI Farm via Cloudflare gateway with auto-reconnect.",
                 "status": "COMPLETED",
                 "children": [
                     {
-                        "name": "SERVER.STATUS",
-                        "description": "Real-time monitoring of node connection and uptime.",
+                        "name": "FARM.AUTO_LOGIN",
+                        "description": "Auto-connect on app start with persistent node ID.",
                         "status": "COMPLETED"
                     },
                     {
-                        "name": "SERVER.DEVICE_DISCOVERY",
-                        "description": "API endpoint (/v1/internal/devices) returning validated linguistic identifiers (CPU1, GPU1) linked to specific validated hardware chips.",
+                        "name": "FARM.HEARTBEAT",
+                        "description": "15-second heartbeat with stats (uptime, tokens, speed, model).",
                         "status": "COMPLETED"
                     },
                     {
-                        "name": "SERVER.MODELS_ENDPOINT",
-                        "description": "Dynamic /v1/models endpoint listing all downloaded models with metadata for AIVR Core discovery.",
+                        "name": "FARM.RECONNECT",
+                        "description": "Exponential backoff auto-reconnect (1s to 32s) on disconnect.",
                         "status": "COMPLETED"
                     },
                     {
-                        "name": "SERVER.AUTH",
-                        "description": "Optional Bearer token API key authentication middleware.",
-                        "status": "COMPLETED"
-                    },
-                    {
-                        "name": "SERVER.ERROR_FORMAT",
-                        "description": "OpenAI-spec compliant error responses with type, message, and code fields.",
+                        "name": "FARM.COMMAND_QUEUE",
+                        "description": "Sequential command processing to prevent concurrent model ops.",
                         "status": "COMPLETED"
                     }
                 ]
             },
             {
-                "name": "BRIDGE.AIVR_CORE",
-                "description": "Integration with AIVR Core mesh for node registration, token reporting, and model relay.",
+                "name": "TOKEN.ECONOMY",
+                "description": "Token earnings tracking and reporting to farm.",
                 "status": "COMPLETED",
                 "children": [
                     {
-                        "name": "MESH.REGISTRATION",
-                        "description": "UDP-based node registration/deregistration with AIVR mesh (Port 12000).",
-                        "status": "COMPLETED"
-                    },
-                    {
-                        "name": "MESH.HEARTBEAT",
-                        "description": "Periodic heartbeat to Service-Relay (Port 9800) with node health stats.",
+                        "name": "TOKEN.TRACKING",
+                        "description": "Per-request token usage (in/out) with cumulative totals and speed.",
                         "status": "COMPLETED"
                     },
                     {
                         "name": "TOKEN.REPORTING",
-                        "description": "Per-request token usage reporting to AIVR Orchestrator for node crediting.",
+                        "description": "Real-time token reporting to farm for credit/exchange.",
                         "status": "COMPLETED"
                     },
                     {
-                        "name": "MODEL.RELAY",
-                        "description": "Advertising available models to the mesh for cross-node discovery.",
-                        "status": "COMPLETED"
-                    },
-                    {
-                        "name": "NATIVE.BRIDGE",
-                        "description": "C++ FFI bridge (mobile_bridge.cpp) exposing AIVR Core functions to Flutter.",
+                        "name": "TOKEN.EARNINGS_DISPLAY",
+                        "description": "Prominent earnings display on status dashboard.",
                         "status": "COMPLETED"
                     }
                 ]
             },
             {
-                "name": "INTERFACE.AGENT",
-                "description": "Local agent chat interface using loaded model for direct inference.",
+                "name": "DEVICE.CAPABILITIES",
+                "description": "Hardware profiling: CPU cores, RAM, storage, OS — sent to farm for routing.",
                 "status": "COMPLETED"
             },
             {
-                "name": "INTERFACE.LIVE",
-                "description": "Neural Audio Bridge for voice-to-voice interaction.",
-                "status": "PARTIAL"
+                "name": "INTERFACE.DASHBOARD",
+                "description": "Read-only status dashboard: connection, model, earnings, stats, logs.",
+                "status": "COMPLETED"
             },
             {
-                "name": "INTERFACE.SENSORS",
-                "description": "Hardware telemetry (Battery/Geo) integration.",
+                "name": "PLATFORM.ANDROID",
+                "description": "Android support with wake lock, foreground service permissions, battery optimization bypass.",
                 "status": "COMPLETED"
+            },
+            {
+                "name": "PLATFORM.IOS",
+                "description": "iOS support.",
+                "status": "NOT_IMPLEMENTED"
             }
         ]
     },
     "statusDefinitions": {
         "COMPLETED": "Production ready, fully working.",
         "PARTIAL": "Some parts working; not fully completed or validated.",
-        "SIMULATED": "No real function; mimics behavior for testing/demo.",
         "NOT_IMPLEMENTED": "No working code/path available."
     }
 }

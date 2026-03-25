@@ -1,47 +1,31 @@
-enum LoadStatus { none, loading, success, error }
-
+/// Minimal model info — the farm controls which models are deployed.
+/// This just tracks what's on-device.
 class ModelInfo {
   final String id;
   final String name;
   final String size;
   final String contextWindow;
-  final String tokenLimit;
-  final String speedRating;
-  final String trainedDate;
-  final String vram;
-  final List<String> roles;
-  final List<String> tools;
-  final String languages;
   final String quantization;
+  final String vram;
   bool isDownloaded;
-  final bool isSupported;
-  final String targetUnit; // NPU, GPU, CPU, XPU
-  final String pciDeviceId;
-  final int unitId;
 
   ModelInfo({
     required this.id,
     required this.name,
     required this.size,
-    required this.contextWindow,
-    required this.tokenLimit,
-    required this.speedRating,
-    required this.trainedDate,
-    required this.vram,
-    required this.roles,
-    required this.tools,
-    required this.languages,
+    this.contextWindow = '32k',
     this.quantization = 'Q8',
+    this.vram = '2.0 GB',
     this.isDownloaded = false,
-    this.isSupported = true,
-    this.targetUnit = 'NPU',
-    this.pciDeviceId = '0x8086:0x9A40',
-    this.unitId = 0,
   });
-}
 
-class Message {
-  final String role;
-  final String text;
-  Message({required this.role, required this.text});
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'size': size,
+        'context_window': contextWindow,
+        'quantization': quantization,
+        'vram': vram,
+        'is_downloaded': isDownloaded,
+      };
 }

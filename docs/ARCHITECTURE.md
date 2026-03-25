@@ -1,96 +1,112 @@
-# AI-Mobile-Host — ARCHITECTURE.md
+# AIVR Farm Node — ARCHITECTURE.md
 
-## 1. System Role: The "Body" (Mobile UI/Sensor) + AI Inference Node
-**AIVR-AI-Mobile-Host** is the portal to the AIVR ecosystem on mobile devices (Android/iOS). It provides:
-- The primary user interface for mobile interaction
-- An OpenAI-compatible inference server (Cactus LLM)
-- Bridges mobile hardware (GPS, IMU, Camera) into the C++ Axon bus
-- Token/model relay to AIVR Core for earned credits and cross-node discovery
+## 1. System Role: Dedicated AI Inference Worker
 
-## 2. Component Topology
+**AIVR Farm Node** is a headless worker that connects to the AIVR AI Farm via Cloudflare gateway. It does one thing: run LLM inference on mobile hardware and earn tokens.
+
+The user installs the app, it auto-connects to the farm, and the farm controls everything from there: which model to download, when to load it, and what inference requests to serve.
+
+## 2. Token Economy
+
+Users earn tokens by contributing device compute to the farm:
+- **Earning**: Every inference request processed earns tokens (95% of total tokens processed)
+- **Spending**: Earned tokens can be used on the user's own AI system
+- **Trading**: Tokens can be bought/sold on the token exchange
+
+## 3. Component Topology
+
 ```mermaid
 graph TD
-    Flutter[Flutter UI Layer] --> NativeBridge[Platform Channels: Java/Swift]
-    Flutter --> OpenAI[OpenAI HTTP Server :8080]
-    Flutter --> AivrBridge[AivrCoreBridge Dart Layer]
-    NativeBridge --> Core[AIVR-Core C++ Library]
-    Core --> Mesh[App-Wifi-Mesh Satellite :12000]
-    Core --> Relay[Service-Relay Subscriber :9800]
-    AivrBridge --> Mesh
-    AivrBridge --> Relay
-    OpenAI --> CactusLM[Cactus LLM SDK]
-    OpenAI --> AivrBridge
+    App[Flutter App] --> Boot[Bootstrap / Auto-Login]
+    Boot --> Farm[FarmConnection WebSocket]
+    Boot --> Caps[DeviceCapabilities]
+    Farm -->|wss://| CF[Cloudflare Gateway]
+    CF --> FarmServer[AI Farm Server]
+    Farm --> Handler[FarmCommandHandler]
+    Handler --> Cactus[CactusLM SDK]
+    Handler --> State[NodeState]
+    State --> Dashboard[StatusDashboard UI]
 ```
 
-## 3. The Hybrid Flutter/C++ Model
-The UI is built with **Flutter** for rapid iteration and cross-platform consistency. The business logic, networking, and P2P discovery are handled by the linked **AIVR-Core C++** library via FFI (Foreign Function Interface).
+## 4. Connection Flow
 
-### 3.1 AIVR Core Bridge (New)
-The `AivrCoreBridge` (Dart) and `mobile_bridge.cpp` (C++) together form the integration layer:
-
-| Component | Role |
-|-----------|------|
-| `aivr_core_bridge.dart` | Dart service: mesh registration, heartbeat, token reporting |
-| `mobile_bridge.cpp` | C++ FFI: node state, token aggregation, model relay |
-
-**Lifecycle:**
-1. `initialize()` — boot time, config load
-2. `registerNode()` — UDP announce to mesh with model list
-3. `reportTokens()` — per-request credit to orchestrator
-4. `updateModels()` — advertise model changes
-5. `deregisterNode()` — clean shutdown
-
-## 4. OpenAI-Compatible API Layer
-The server (shelf + shelf_router on `:8080`) exposes:
-
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/v1/chat/completions` | POST | Chat inference (streaming + non-streaming) |
-| `/v1/models` | GET | List all downloaded models with metadata |
-| `/v1/internal/devices` | GET | Compute unit discovery (NPU/GPU/CPU) |
-| `/v1/internal/stats` | GET | Token counts, uptime, speed, AIVR node ID |
-| `/` | GET | Health check with model/version/uptime |
-
-**Auth:** Optional Bearer token middleware. Open (no auth) when no key configured.
-
-**Token Flow:**
 ```
-Request → Cactus LLM → Response
-                ↓
-        AivrCoreBridge.reportTokens()
-                ↓
-        UDP → Mesh (credit node) + Relay (aggregate stats)
+App Start
+  → Generate/load persistent node ID
+  → Gather device capabilities (CPU, RAM, storage)
+  → Connect WebSocket to wss://farm.aivr.ai/ws/node?node_id=...
+  → Send node_hello (capabilities, downloaded models)
+  → Start 15s heartbeat
+  → Wait for commands
 ```
 
-## 5. Mobile Sensor Pipeline
-Sensors (Accelerometers, Gyroscopes) are sampled at 60Hz and "Emitted" as binary vectors through the `App-Wifi-Mesh` to the PC Host for real-time tracking or gesture recognition.
+Auto-reconnect on disconnect: 1s → 2s → 4s → 8s → 16s → 32s (max).
 
-## 6. Biometric Identity Bridge
-On login, the app uses native FaceID/Fingerprint APIs. The resulting signature is verified by `Service-OAuth` during the initial handshake.
+## 5. Command Protocol
 
-## 7. Communication: The Mobile Axon
-Connects to the PC Host via Port 12000 (Mesh) and 9800 (Relay). Supports cellular fallback (via Relay Proxy) if the local Mesh is unreachable.
+All messages are JSON over WebSocket.
 
-### 7.1 AIVR Core Mesh Protocol
-- **Registration**: JSON payload via UDP to Port 12000 on server start
-- **Heartbeat**: Every 30s via UDP to Port 9800 (stats, uptime, token speed)
-- **Token Report**: Fire-and-forget UDP after each inference request
-- **Model Update**: Broadcast when models are downloaded/deleted
-- **Deregistration**: UDP notify on server stop
+### Farm → Node (Commands)
 
-## 8. State Machine (Mobile Flow)
-- `DISCONNECTED`: Awaiting discovery.
-- `SEARCHING`: Scanning local Wi-Fi for PC Host.
-- `CONNECTED`: Sensors streaming, UI active.
-- `SERVING`: OpenAI server running, accepting inference requests.
-- `BACKGROUND`: UI hibernated, server still active (wake lock enabled).
+| Command | Payload | Action |
+|---------|---------|--------|
+| `download_model` | `{model_id, download_url}` | Download GGUF weights |
+| `load_model` | `{model_id, context_size}` | Initialize model for inference |
+| `unload_model` | `{}` | Free model from memory |
+| `delete_model` | `{model_id}` | Remove weights from storage |
+| `inference` | `{request_id, messages[], stream, temperature, max_tokens}` | Run chat completion |
+| `report_status` | `{}` | Return full status snapshot |
 
-## 9. Implementation Detail: Native Plugins
-- **Android:** JNI (Java Native Interface) bridge.
-- **iOS:** Objective-C++ wrapper for the AIVR core.
-- **C++ FFI:** `mobile_bridge.cpp` exports `aivr_register_node`, `aivr_report_tokens`, `aivr_get_node_health`, etc.
+### Node → Farm (Responses)
 
-## 10. Links
-- [Plugin API](../docs/API_SPEC.md)
-- [Sensor Schema](../docs/SCHEMA.md)
-- [Security](../docs/SECURITY.md)
+| Message Type | Purpose |
+|-------------|---------|
+| `node_hello` | Registration with capabilities |
+| `heartbeat` | 15s stats update |
+| `command_result` | Success/error for any command |
+| `inference_chunk` | Streaming token (per chunk) |
+| `inference_complete` | Final response + usage stats |
+| `token_report` | Per-request token credit |
+| `download_progress` | Model download progress |
+| `node_goodbye` | Clean disconnect |
+
+## 6. File Structure
+
+```
+.mobile/lib/
+  main.dart                    -- App shell, bootstrap, auto-connect
+  node_state.dart              -- ChangeNotifier: single source of truth
+  farm_connection.dart         -- WebSocket client, heartbeat, reconnect
+  farm_command_handler.dart    -- Command dispatch, inference execution
+  device_capabilities.dart     -- Hardware profiling for farm routing
+  models.dart                  -- Minimal ModelInfo (farm-controlled)
+  screens/
+    status_dashboard.dart      -- Read-only status UI
+```
+
+## 7. What Was Removed
+
+- Agent chat tab (no local chat)
+- Model picker UI (farm controls models)
+- Sensor tab (not needed for inference)
+- Local HTTP server (shelf) — inference goes through WebSocket, not HTTP
+- Manual model download — farm commands downloads
+- OpenAI API endpoints — farm proxies these to clients
+- UDP mesh registration — replaced by WebSocket to Cloudflare
+
+## 8. Platform Support
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| Android | Supported | NPU/GPU/CPU inference via Cactus SDK |
+| iOS | Planned | iPhone 14+ targeted |
+| Windows (Service) | Planned | NPU-exclusive background service |
+
+## 9. Optimal Token Throughput
+
+- **Wake lock**: Device never sleeps during inference
+- **Foreground service**: Android won't kill the process
+- **Battery optimization bypass**: Requested on install
+- **NPU-first**: Cactus SDK uses ARM NEON/SVE, Metal, Vulkan
+- **Sequential queue**: Commands processed one at a time to avoid OOM
+- **Auto-reconnect**: Never misses farm commands
