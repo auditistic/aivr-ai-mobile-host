@@ -83,17 +83,59 @@
             },
             {
                 "name": "DEVICE.CAPABILITIES",
-                "description": "Hardware profiling: CPU cores, RAM, storage, OS — sent to farm for routing.",
-                "status": "COMPLETED"
+                "description": "Cross-platform hardware profiling: CPU, RAM, storage, NPU/GPU detection — sent to farm for optimal routing.",
+                "status": "COMPLETED",
+                "children": [
+                    {
+                        "name": "DETECT.ANDROID",
+                        "description": "Android: /proc/meminfo, Qualcomm Hexagon NPU, Adreno GPU, Mali GPU.",
+                        "status": "COMPLETED"
+                    },
+                    {
+                        "name": "DETECT.WINDOWS",
+                        "description": "Windows: wmic RAM/GPU, Intel NPU, NVIDIA/AMD GPU detection.",
+                        "status": "COMPLETED"
+                    },
+                    {
+                        "name": "DETECT.MACOS",
+                        "description": "macOS: sysctl memsize, Apple Silicon Neural Engine, Metal GPU.",
+                        "status": "COMPLETED"
+                    },
+                    {
+                        "name": "DETECT.LINUX",
+                        "description": "Linux: /proc/meminfo, nvidia-smi, /sys/class/accel NPU, lspci GPU.",
+                        "status": "COMPLETED"
+                    }
+                ]
             },
             {
                 "name": "INTERFACE.DASHBOARD",
-                "description": "Read-only status dashboard: connection, model, earnings, stats, logs.",
+                "description": "Read-only status dashboard: connection, model, earnings, stats, hardware info, logs.",
+                "status": "COMPLETED"
+            },
+            {
+                "name": "INTERFACE.HEADLESS",
+                "description": "Headless CLI mode (main_headless.dart) for desktop/server — no GUI, SIGINT/SIGTERM handling.",
                 "status": "COMPLETED"
             },
             {
                 "name": "PLATFORM.ANDROID",
                 "description": "Android support with wake lock, foreground service permissions, battery optimization bypass.",
+                "status": "COMPLETED"
+            },
+            {
+                "name": "PLATFORM.WINDOWS",
+                "description": "Windows support: Flutter GUI or headless CLI, Intel NPU/NVIDIA GPU detection.",
+                "status": "COMPLETED"
+            },
+            {
+                "name": "PLATFORM.MACOS",
+                "description": "macOS support: Flutter GUI or headless CLI, Apple Neural Engine detection.",
+                "status": "COMPLETED"
+            },
+            {
+                "name": "PLATFORM.LINUX",
+                "description": "Linux support: Flutter GUI or headless CLI, NVIDIA/Intel NPU detection, systemd/Docker friendly.",
                 "status": "COMPLETED"
             },
             {

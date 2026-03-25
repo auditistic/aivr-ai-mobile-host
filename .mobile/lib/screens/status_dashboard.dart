@@ -158,6 +158,7 @@ class _StatusDashboardState extends State<StatusDashboard> {
 
   // --- Connection Card ---
   Widget _buildConnectionCard(NodeState s) {
+    final caps = s.capabilities;
     return _card(
       children: [
         _labelRow('FARM CONNECTION', Icons.cloud_outlined),
@@ -165,7 +166,14 @@ class _StatusDashboardState extends State<StatusDashboard> {
         _infoRow('NODE ID', s.nodeId.length > 12
             ? '${s.nodeId.substring(0, 12)}...'
             : s.nodeId),
+        _infoRow('PLATFORM', caps?.platform.toUpperCase() ?? 'UNKNOWN'),
         _infoRow('UPTIME', _formatUptime(s.uptimeSeconds)),
+        if (caps?.gpuName != null)
+          _infoRow('COMPUTE', caps!.gpuName!),
+        if (caps?.gpuName == null && caps != null)
+          _infoRow('COMPUTE', caps.computePreference.name.toUpperCase()),
+        if (caps != null)
+          _infoRow('HARDWARE', '${caps.cpuCores} cores / ${caps.totalRamMb}MB RAM'),
         if (s.farmGatewayUrl != null)
           _infoRow('GATEWAY', s.farmGatewayUrl!.replaceAll('wss://', '')),
         if (s.connectionState != FarmConnectionState.connected)

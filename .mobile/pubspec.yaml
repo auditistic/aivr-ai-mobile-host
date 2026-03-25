@@ -1,7 +1,7 @@
 name: aivr_farm_node
-description: Dedicated AI Farm worker node — earn tokens by contributing mobile compute
+description: Dedicated AI Farm worker node — earn tokens by contributing compute (mobile + desktop)
 publish_to: 'none'
-version: 2.0.0+1
+version: 2.1.0+1
 
 environment:
   sdk: '>=3.7.0 <4.0.0'
@@ -23,6 +23,11 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  # Enable desktop targets
+  # Run: flutter config --enable-windows-desktop
+  #      flutter config --enable-macos-desktop
+  #      flutter config --enable-linux-desktop
 
 dependency_overrides:
   path: ^1.9.0

@@ -96,17 +96,47 @@ All messages are JSON over WebSocket.
 
 ## 8. Platform Support
 
-| Platform | Status | Notes |
-|----------|--------|-------|
-| Android | Supported | NPU/GPU/CPU inference via Cactus SDK |
-| iOS | Planned | iPhone 14+ targeted |
-| Windows (Service) | Planned | NPU-exclusive background service |
+| Platform | Status | Compute | Mode |
+|----------|--------|---------|------|
+| Android | Supported | Qualcomm NPU/Adreno GPU/ARM CPU | Flutter GUI + wake lock |
+| iOS | Planned | Apple Neural Engine | Flutter GUI |
+| Windows | Supported | Intel NPU, NVIDIA/AMD GPU, CPU | Flutter GUI or headless CLI |
+| macOS | Supported | Apple Neural Engine / Metal | Flutter GUI or headless CLI |
+| Linux | Supported | NVIDIA GPU, Intel NPU, CPU | Flutter GUI or headless CLI |
+
+### Desktop Modes
+
+**Flutter GUI** — Same status dashboard as mobile, runs as a desktop window:
+```bash
+flutter run -d windows   # or macos, linux
+```
+
+**Headless CLI** — No GUI, pure terminal. For servers, Docker, systemd:
+```bash
+dart run lib/main_headless.dart
+dart run lib/main_headless.dart --farm-url wss://custom.farm/ws/node
+AIVR_FARM_URL=wss://... dart run lib/main_headless.dart
+```
+
+Headless mode handles SIGINT/SIGTERM for clean shutdown in systemd/Docker.
 
 ## 9. Optimal Token Throughput
 
-- **Wake lock**: Device never sleeps during inference
-- **Foreground service**: Android won't kill the process
-- **Battery optimization bypass**: Requested on install
-- **NPU-first**: Cactus SDK uses ARM NEON/SVE, Metal, Vulkan
+- **Wake lock** (mobile): Device never sleeps during inference
+- **Foreground service** (Android): OS won't kill the process
+- **Battery optimization bypass** (Android): Requested on install
+- **Headless mode** (desktop): No GUI overhead, pure inference
+- **NPU-first**: Auto-detects best compute unit per platform
 - **Sequential queue**: Commands processed one at a time to avoid OOM
 - **Auto-reconnect**: Never misses farm commands
+
+## 10. Device Capability Detection
+
+The node auto-detects hardware on every platform and reports to the farm:
+
+| Platform | RAM | GPU/NPU Detection |
+|----------|-----|-------------------|
+| Android | `/proc/meminfo` | sysfs: Hexagon NPU, Adreno, Mali |
+| Linux | `/proc/meminfo` | `nvidia-smi`, `/sys/class/accel`, `lspci` |
+| macOS | `sysctl hw.memsize` | `sysctl hw.optional.arm64` (Apple Silicon = ANE) |
+| Windows | `wmic ComputerSystem` | `wmic Win32_PnPEntity` (NPU), `Win32_VideoController` (GPU) |

@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:cactus/cactus.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -13,9 +14,14 @@ import 'screens/status_dashboard.dart';
 // ---------------------------------------------------------------------------
 // AIVR Farm Node — Dedicated AI inference worker.
 //
+// Cross-platform: Android, iOS, Windows, macOS, Linux.
+//
 // This app does ONE thing: connect to the AI Farm via Cloudflare gateway,
 // accept commands (download model, load, inference), rip tokens, and
 // report earnings. No local chat, no model picker, no user options.
+//
+// Mobile: phone sits on a charger, wake-locked, earning tokens 24/7.
+// Desktop: runs as a background app/service, leveraging NPU/GPU.
 //
 // Token economy: users earn tokens by contributing device compute.
 // Tokens can be spent on their own AI usage or traded on the exchange.
@@ -83,13 +89,17 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
     final farmUrl = prefs.getString('farm_url') ?? kDefaultFarmGateway;
     _state.farmGatewayUrl = farmUrl;
 
-    // 3. Gather device capabilities
+    // 3. Gather device capabilities (cross-platform)
     _state.addLog('Gathering device capabilities...');
     _state.capabilities = await DeviceCapabilities.gather();
+    final caps = _state.capabilities!;
     _state.addLog(
-      'Device: ${_state.capabilities!.cpuCores} cores, '
-      '${_state.capabilities!.totalRamMb}MB RAM, '
-      '${_state.capabilities!.availableStorageMb}MB storage',
+      '${caps.platform.toUpperCase()}: ${caps.cpuCores} cores, '
+      '${caps.totalRamMb}MB RAM, ${caps.availableStorageMb}MB storage',
+    );
+    _state.addLog(
+      'Compute: ${caps.computePreference.name.toUpperCase()}'
+      '${caps.gpuName != null ? " (${caps.gpuName})" : ""}',
     );
 
     // 4. Discover downloaded models from Cactus SDK
@@ -124,9 +134,14 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
     );
     _commandHandler.attachFarm(_farm);
 
-    // 7. Keep device awake
-    await WakelockPlus.enable();
-    _state.addLog('Wake lock enabled');
+    // 7. Platform-specific setup
+    if (DeviceCapabilities.isMobile) {
+      // Mobile: keep device awake to serve inference 24/7
+      await WakelockPlus.enable();
+      _state.addLog('Wake lock enabled (mobile)');
+    } else {
+      _state.addLog('Desktop mode — no wake lock needed');
+    }
 
     // 8. Auto-connect to farm
     setState(() => _booted = true);
@@ -154,7 +169,9 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
     WidgetsBinding.instance.removeObserver(this);
     _farm.dispose();
     _cactusLM.unload();
-    WakelockPlus.disable();
+    if (DeviceCapabilities.isMobile) {
+      WakelockPlus.disable();
+    }
     super.dispose();
   }
 
