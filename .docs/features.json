@@ -2,7 +2,7 @@
     "schemaVersion": "1.0",
     "root": {
         "name": "CACTUS AI",
-        "description": "Android-native local AI node with OpenAI-compatible bridge.",
+        "description": "Android-native local AI node with OpenAI-compatible bridge and AIVR Core mesh integration.",
         "status": "PARTIAL",
         "children": [
             {
@@ -41,7 +41,7 @@
             },
             {
                 "name": "BRIDGE.OPENAI",
-                "description": "Local HTTP server providing OpenAI-compatible endpoints.",
+                "description": "Local HTTP server providing OpenAI-compatible endpoints with AIVR Core mesh integration.",
                 "status": "COMPLETED",
                 "children": [
                     {
@@ -53,8 +53,60 @@
                         "name": "SERVER.DEVICE_DISCOVERY",
                         "description": "API endpoint (/v1/internal/devices) returning validated linguistic identifiers (CPU1, GPU1) linked to specific validated hardware chips.",
                         "status": "COMPLETED"
+                    },
+                    {
+                        "name": "SERVER.MODELS_ENDPOINT",
+                        "description": "Dynamic /v1/models endpoint listing all downloaded models with metadata for AIVR Core discovery.",
+                        "status": "COMPLETED"
+                    },
+                    {
+                        "name": "SERVER.AUTH",
+                        "description": "Optional Bearer token API key authentication middleware.",
+                        "status": "COMPLETED"
+                    },
+                    {
+                        "name": "SERVER.ERROR_FORMAT",
+                        "description": "OpenAI-spec compliant error responses with type, message, and code fields.",
+                        "status": "COMPLETED"
                     }
                 ]
+            },
+            {
+                "name": "BRIDGE.AIVR_CORE",
+                "description": "Integration with AIVR Core mesh for node registration, token reporting, and model relay.",
+                "status": "COMPLETED",
+                "children": [
+                    {
+                        "name": "MESH.REGISTRATION",
+                        "description": "UDP-based node registration/deregistration with AIVR mesh (Port 12000).",
+                        "status": "COMPLETED"
+                    },
+                    {
+                        "name": "MESH.HEARTBEAT",
+                        "description": "Periodic heartbeat to Service-Relay (Port 9800) with node health stats.",
+                        "status": "COMPLETED"
+                    },
+                    {
+                        "name": "TOKEN.REPORTING",
+                        "description": "Per-request token usage reporting to AIVR Orchestrator for node crediting.",
+                        "status": "COMPLETED"
+                    },
+                    {
+                        "name": "MODEL.RELAY",
+                        "description": "Advertising available models to the mesh for cross-node discovery.",
+                        "status": "COMPLETED"
+                    },
+                    {
+                        "name": "NATIVE.BRIDGE",
+                        "description": "C++ FFI bridge (mobile_bridge.cpp) exposing AIVR Core functions to Flutter.",
+                        "status": "COMPLETED"
+                    }
+                ]
+            },
+            {
+                "name": "INTERFACE.AGENT",
+                "description": "Local agent chat interface using loaded model for direct inference.",
+                "status": "COMPLETED"
             },
             {
                 "name": "INTERFACE.LIVE",

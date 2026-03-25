@@ -9,10 +9,25 @@ find_package(Crow CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 
-# For Mobile (FFI), we will likely export a C API
+# AIVR Core Bridge — Shared library exposing C ABI for Flutter FFI.
+# Exports: node registration, token reporting, model relay, health heartbeat.
 add_library(${PROJECT_NAME} SHARED
     src/mobile_bridge.cpp
 )
+
+# Platform-specific export macros (no __declspec on non-Windows)
+if(NOT WIN32)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        "AIVR_EXPORT=__attribute__((visibility(\"default\")))"
+    )
+    set_target_properties(${PROJECT_NAME} PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+else()
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        "AIVR_EXPORT=__declspec(dllexport)"
+    )
+endif()
 
 target_include_directories(${PROJECT_NAME} PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include

@@ -13,6 +13,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import 'screens/loading_model_screen.dart';
 import 'models.dart';
+import 'aivr_core_bridge.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -50,7 +51,6 @@ class _MainScreenState extends State<MainScreen> {
   bool _isServerRunning = false;
   String _ipAddress = '192.168.1.100';
   final int _port = 8080;
-  int _requestCount = 0;
   final List<Message> _messages = [];
   final TextEditingController _inputController = TextEditingController();
   final TextEditingController _hfController = TextEditingController();
@@ -58,6 +58,10 @@ class _MainScreenState extends State<MainScreen> {
       TextEditingController(); // New Token Controller
   final CactusLM _cactusLM = CactusLM();
   final _uuid = const Uuid();
+
+  // AIVR Core Bridge
+  late final AivrCoreBridge _aivrBridge;
+  String? _apiKey; // Optional API key for auth
 
   // Model management
   String? _selectedModelId;
@@ -79,11 +83,13 @@ class _MainScreenState extends State<MainScreen> {
   int? _selectedContextSize;
   // bool _isModelLoading = false; // Removed as _loadStatus covers it
 
-  // Server Stats
-  int _pendingConnections = 0;
-  int _totalTokensIn = 0;
-  int _totalTokensOut = 0;
-  int get _tokensEarned => ((_totalTokensIn + _totalTokensOut) * 0.95).toInt();
+  // Server Stats (delegated to AIVR bridge)
+  int get _pendingConnections => _aivrBridge.stats.pendingRequests;
+  set _pendingConnections(int v) => _aivrBridge.stats.pendingRequests = v;
+  int get _totalTokensIn => _aivrBridge.stats.totalTokensIn;
+  int get _totalTokensOut => _aivrBridge.stats.totalTokensOut;
+  int get _requestCount => _aivrBridge.stats.requestCount;
+  int get _tokensEarned => _aivrBridge.stats.tokensEarned;
 
   // Loading State
   bool _isWaitingForStart = false;
@@ -151,12 +157,34 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
+    _aivrBridge = AivrCoreBridge();
+    _aivrBridge.onLog = (log) {
+      if (mounted) setState(() => _serverLogs.add(log));
+    };
     _initializeApp();
   }
 
   Future<void> _initializeApp() async {
     await _getIpAddress();
+    await _aivrBridge.initialize(localIp: _ipAddress, serverPort: _port);
+    await _loadApiKey();
     await _startupCheck();
+  }
+
+  Future<void> _loadApiKey() async {
+    final prefs = await SharedPreferences.getInstance();
+    _apiKey = prefs.getString('api_key');
+  }
+
+  Future<void> setApiKey(String? key) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (key == null || key.isEmpty) {
+      await prefs.remove('api_key');
+      _apiKey = null;
+    } else {
+      await prefs.setString('api_key', key);
+      _apiKey = key;
+    }
   }
 
   Future<void> _startupCheck() async {
@@ -630,11 +658,13 @@ class _MainScreenState extends State<MainScreen> {
     }
 
     if (_isServerRunning) {
+      await _aivrBridge.deregisterNode();
       await _server?.close(force: true);
       setState(() {
         _isServerRunning = false;
         _server = null;
       });
+      _serverLogs.add('[AIVR] Node deregistered from mesh');
     } else {
       final router = shelf.Router()
         ..post('/v1/chat/completions', _handleChatCompletion)
@@ -645,6 +675,7 @@ class _MainScreenState extends State<MainScreen> {
 
       final handler = const Pipeline()
           .addMiddleware(_corsHeaders())
+          .addMiddleware(_authMiddleware())
           .addHandler(router.call);
 
       try {
@@ -668,6 +699,15 @@ class _MainScreenState extends State<MainScreen> {
         _server = await io.serve(handler, '0.0.0.0', _port);
         await WakelockPlus.enable(); // Keep device awake
         setState(() => _isServerRunning = true);
+
+        // Register with AIVR Core mesh
+        await _aivrBridge.registerNode(
+          models: _models,
+          localIp: _ipAddress,
+          serverPort: _port,
+        );
+        // Notify mesh of available models
+        await _aivrBridge.updateModels(_models);
       } catch (e) {
         debugPrint('Server error: $e');
       }
@@ -693,17 +733,93 @@ class _MainScreenState extends State<MainScreen> {
     };
   }
 
+  /// API key authentication middleware.
+  /// If no key is configured, all requests are allowed (local-only mode).
+  /// If a key is set, Bearer token must match.
+  Middleware _authMiddleware() {
+    return (Handler handler) {
+      return (Request request) async {
+        // Skip auth if no key configured (open local mode)
+        if (_apiKey == null || _apiKey!.isEmpty) {
+          return handler(request);
+        }
+
+        // Skip auth for health check
+        if (request.url.path == '' || request.url.path == '/') {
+          return handler(request);
+        }
+
+        final authHeader = request.headers['authorization'];
+        if (authHeader == null || !authHeader.startsWith('Bearer ')) {
+          return Response(401,
+            body: jsonEncode({
+              'error': {
+                'message': 'Missing or invalid API key. Provide Authorization: Bearer <key>',
+                'type': 'invalid_request_error',
+                'code': 'invalid_api_key',
+              },
+            }),
+            headers: {'Content-Type': 'application/json'},
+          );
+        }
+
+        final token = authHeader.substring(7);
+        if (token != _apiKey) {
+          return Response(401,
+            body: jsonEncode({
+              'error': {
+                'message': 'Invalid API key provided.',
+                'type': 'invalid_request_error',
+                'code': 'invalid_api_key',
+              },
+            }),
+            headers: {'Content-Type': 'application/json'},
+          );
+        }
+
+        return handler(request);
+      };
+    };
+  }
+
+  /// Build a standard OpenAI-format error response.
+  Response _errorResponse(int statusCode, String message, String type, String code) {
+    return Response(statusCode,
+      body: jsonEncode({
+        'error': {
+          'message': message,
+          'type': type,
+          'code': code,
+        },
+      }),
+      headers: {'Content-Type': 'application/json'},
+    );
+  }
+
   Future<Response> _handleChatCompletion(Request request) async {
     try {
       final body = await request.readAsString();
-      final json = jsonDecode(body) as Map<String, dynamic>;
+
+      // Validate JSON
+      late final Map<String, dynamic> json;
+      try {
+        json = jsonDecode(body) as Map<String, dynamic>;
+      } catch (_) {
+        return _errorResponse(400, 'Invalid JSON in request body',
+            'invalid_request_error', 'invalid_json');
+      }
+
+      // Validate required fields
+      if (!json.containsKey('messages') || json['messages'] is! List || (json['messages'] as List).isEmpty) {
+        return _errorResponse(400, 'messages is required and must be a non-empty array',
+            'invalid_request_error', 'missing_required_field');
+      }
       final messages = json['messages'] as List? ?? [];
       final stream = json['stream'] as bool? ?? false;
       final temperature = (json['temperature'] as num?)?.toDouble() ?? 0.7;
       final maxTokens = json['max_tokens'] as int? ?? 512;
 
       setState(() {
-        _requestCount++;
         _pendingConnections++;
         _serverLogs.add('[REQUEST] Chat Completion (${messages.length} msgs)');
       });
@@ -754,10 +870,15 @@ class _MainScreenState extends State<MainScreen> {
           ),
         );
 
+        // Report tokens to AIVR Core
+        _aivrBridge.reportTokens(TokenUsage(
+          tokensIn: cactusResponse.prefillTokens,
+          tokensOut: cactusResponse.decodeTokens,
+          modelId: _activeModelId ?? 'cactus-default',
+        ));
+
         if (mounted) {
           setState(() {
-            _totalTokensIn += cactusResponse.prefillTokens;
-            _totalTokensOut += cactusResponse.decodeTokens;
             if (_pendingConnections > 0) _pendingConnections--;
           });
         }
@@ -813,11 +934,8 @@ class _MainScreenState extends State<MainScreen> {
           if (_pendingConnections > 0) _pendingConnections--;
         });
       }
-      return Response.internalServerError(
-        body: jsonEncode({
-          'error': {'message': e.toString()},
-        }),
-      );
+      _serverLogs.add('[ERROR] Chat completion failed: $e');
+      return _errorResponse(500, 'Inference error: $e', 'server_error', 'inference_failed');
     }
   }
 
@@ -860,10 +978,15 @@ class _MainScreenState extends State<MainScreen> {
       // Wait for final result for usage stats
       final finalResult = await streamedResult.result;
 
+      // Report tokens to AIVR Core
+      _aivrBridge.reportTokens(TokenUsage(
+        tokensIn: finalResult.prefillTokens,
+        tokensOut: finalResult.decodeTokens,
+        modelId: _activeModelId ?? 'cactus-default',
+      ));
+
       if (mounted) {
         setState(() {
-          _totalTokensIn += finalResult.prefillTokens;
-          _totalTokensOut += finalResult.decodeTokens;
           if (_pendingConnections > 0) _pendingConnections--;
         });
       }
@@ -899,13 +1022,46 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   Future<Response> _handleListModels(Request request) async {
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final modelData = _models
+        .where((m) => m.isDownloaded)
+        .map((m) => {
+              'id': m.id,
+              'object': 'model',
+              'created': now,
+              'owned_by': 'cactus',
+              'permission': <dynamic>[],
+              'root': m.id,
+              'parent': null,
+              // Extra metadata for AIVR Core consumers
+              'meta': {
+                'name': m.name,
+                'size': m.size,
+                'context_window': m.contextWindow,
+                'token_limit': m.tokenLimit,
+                'quantization': m.quantization,
+                'target_unit': m.targetUnit,
+                'speed_rating': m.speedRating,
+              },
+            })
+        .toList();
+
+    // Always include the active model at the top if loaded
+    if (_activeModelId != null &&
+        !modelData.any((m) => m['id'] == _activeModelId)) {
+      modelData.insert(0, {
+        'id': _activeModelId!,
+        'object': 'model',
+        'created': now,
+        'owned_by': 'cactus',
+        'permission': <dynamic>[],
+        'root': _activeModelId!,
+        'parent': null,
+      });
+    }
+
     return Response.ok(
-      jsonEncode({
-        'object': 'list',
-        'data': [
-          {'id': 'cactus-pro-8b'},
-        ],
-      }),
+      jsonEncode({'object': 'list', 'data': modelData}),
       headers: {'Content-Type': 'application/json'},
     );
   }
@@ -931,23 +1087,17 @@ class _MainScreenState extends State<MainScreen> {
 
   Future<Response> _handleGetStats(Request request) async {
     return Response.ok(
-      jsonEncode({
-        'uptime': 0, // Need to implement real uptime tracking
-        'request_count': _requestCount,
-        'tokens_in': _totalTokensIn,
-        'tokens_out': _totalTokensOut,
-        'earned': _tokensEarned,
-        'token_speed': 0.0,
-        'pending_requests': _pendingConnections,
-        'model_id': _activeModelId ?? 'none',
-      }),
+      jsonEncode(_aivrBridge.getStatsJson(activeModelId: _activeModelId)),
       headers: {'Content-Type': 'application/json'},
     );
   }
 
   Future<Response> _handleHealthCheck(Request request) async {
     return Response.ok(
-      jsonEncode({'status': 'running'}),
+      jsonEncode(_aivrBridge.getHealthJson(
+        activeModelId: _activeModelId,
+        activeModelName: _activeModel?.name,
+      )),
       headers: {'Content-Type': 'application/json'},
     );
   }
@@ -2378,15 +2528,67 @@ Widget _buildLockScreen() {
     );
   }
 
-  void _sendMessage() {
-    if (_inputController.text.trim().isEmpty) return;
+  void _sendMessage() async {
+    final text = _inputController.text.trim();
+    if (text.isEmpty) return;
+
     setState(() {
-      _messages.add(Message(role: 'user', text: _inputController.text));
-      _messages.add(
-        Message(role: 'assistant', text: 'Response from Cactus neural core...'),
-      );
+      _messages.add(Message(role: 'user', text: text));
     });
     _inputController.clear();
+
+    // If model is loaded, use it for real inference
+    if (_cactusLM.isLoaded()) {
+      try {
+        // Build chat history for context
+        final chatMessages = _messages
+            .map((m) => ChatMessage(
+                  role: m.role == 'user' ? 'user' : 'assistant',
+                  content: m.text,
+                ))
+            .toList();
+
+        final response = await _cactusLM.generateCompletion(
+          messages: chatMessages,
+          params: CactusCompletionParams(
+            temperature: 0.7,
+            maxTokens: 512,
+          ),
+        );
+
+        // Report tokens to AIVR Core
+        _aivrBridge.reportTokens(TokenUsage(
+          tokensIn: response.prefillTokens,
+          tokensOut: response.decodeTokens,
+          modelId: _activeModelId ?? 'cactus-default',
+        ));
+
+        if (mounted) {
+          setState(() {
+            _messages.add(Message(
+              role: 'assistant',
+              text: response.response,
+            ));
+          });
+        }
+      } catch (e) {
+        if (mounted) {
+          setState(() {
+            _messages.add(Message(
+              role: 'assistant',
+              text: '[Error] Inference failed: $e',
+            ));
+          });
+        }
+      }
+    } else {
+      setState(() {
+        _messages.add(Message(
+          role: 'assistant',
+          text: 'No model loaded. Go to MODEL tab to download and initialize a model.',
+        ));
+      });
+    }
   }
 
   Widget _buildLiveTab() {
@@ -2854,8 +3056,11 @@ Widget _buildLockScreen() {
 
   @override
   void dispose() {
+    _aivrBridge.dispose();
     _server?.close(force: true);
     _inputController.dispose();
+    _hfController.dispose();
+    _hfTokenController.dispose();
     super.dispose();
   }
 }
