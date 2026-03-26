@@ -1,31 +1,14 @@
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 
-/// Preferred compute unit for inference (farm uses this for model assignment).
-enum ComputePreference { npu, gpu, cpu }
+// Re-export data classes so existing imports still work.
+export 'device_capabilities_data.dart';
 
-/// Device hardware capabilities reported to the AI Farm for routing decisions.
-class DeviceCapabilities {
-  final int cpuCores;
-  final int totalRamMb;
-  final int availableStorageMb;
-  final String osVersion;
-  final String platform; // 'android' | 'ios' | 'windows' | 'macos' | 'linux'
-  final ComputePreference computePreference;
-  final String? gpuName; // e.g. "NVIDIA RTX 4090", "Apple M2", "Intel Arc"
-  List<DownloadedModel> downloadedModels;
+import 'device_capabilities_data.dart';
 
-  DeviceCapabilities({
-    required this.cpuCores,
-    required this.totalRamMb,
-    required this.availableStorageMb,
-    required this.osVersion,
-    required this.platform,
-    this.computePreference = ComputePreference.cpu,
-    this.gpuName,
-    this.downloadedModels = const [],
-  });
-
+/// Platform-specific hardware detection.
+/// Uses dart:io — NOT available on web. Web preview uses data classes directly.
+class DeviceDetector {
   /// True if running on a desktop platform (Windows/macOS/Linux).
   static bool get isDesktop =>
       Platform.isWindows || Platform.isMacOS || Platform.isLinux;
@@ -33,6 +16,7 @@ class DeviceCapabilities {
   /// True if running on a mobile platform (Android/iOS).
   static bool get isMobile => Platform.isAndroid || Platform.isIOS;
 
+  /// Gather device capabilities. Only call from native (non-web) targets.
   static Future<DeviceCapabilities> gather() async {
     final cpuCores = Platform.numberOfProcessors;
     final osVersion = Platform.operatingSystemVersion;
@@ -53,18 +37,6 @@ class DeviceCapabilities {
     );
   }
 
-  Map<String, dynamic> toJson() => {
-        'cpu_cores': cpuCores,
-        'total_ram_mb': totalRamMb,
-        'available_storage_mb': availableStorageMb,
-        'os_version': osVersion,
-        'platform': platform,
-        'compute_preference': computePreference.name,
-        'gpu_name': gpuName,
-        'is_desktop': isDesktop,
-        'downloaded_models': downloadedModels.map((m) => m.toJson()).toList(),
-      };
-
   // --- Platform detection ---
 
   static String _detectPlatform() {
@@ -81,7 +53,6 @@ class DeviceCapabilities {
   static Future<int> _detectRam() async {
     try {
       if (Platform.isAndroid || Platform.isLinux) {
-        // /proc/meminfo works on both Android and Linux
         final meminfo = await File('/proc/meminfo').readAsString();
         final match = RegExp(r'MemTotal:\s+(\d+)\s+kB').firstMatch(meminfo);
         if (match != null) return int.parse(match.group(1)!) ~/ 1024;
@@ -102,7 +73,7 @@ class DeviceCapabilities {
         }
       }
     } catch (_) {}
-    return 4096; // Conservative default
+    return 4096;
   }
 
   // --- Storage detection (cross-platform) ---
@@ -110,10 +81,8 @@ class DeviceCapabilities {
   static Future<int> _detectStorage() async {
     try {
       final appDir = await getApplicationDocumentsDirectory();
-
       if (Platform.isWindows) {
-        // Use wmic or PowerShell for free disk space
-        final drive = appDir.path.substring(0, 2); // e.g. "C:"
+        final drive = appDir.path.substring(0, 2);
         final result = await Process.run('wmic', [
           'logicaldisk', 'where', 'DeviceID="$drive"', 'get', 'FreeSpace'
         ]);
@@ -125,7 +94,6 @@ class DeviceCapabilities {
           }
         }
       } else {
-        // df works on Android, Linux, macOS
         final result = await Process.run('df', ['-k', appDir.path]);
         if (result.exitCode == 0) {
           final lines = result.stdout.toString().split('\n');
@@ -145,86 +113,48 @@ class DeviceCapabilities {
 
   static Future<_ComputeResult> _detectCompute() async {
     try {
-      // --- Android: NPU/GPU via sysfs ---
-      if (Platform.isAndroid) {
-        return await _detectComputeAndroid();
-      }
-
-      // --- macOS: Apple Neural Engine (ANE) + Metal GPU ---
-      if (Platform.isMacOS) {
-        return await _detectComputeMacOS();
-      }
-
-      // --- Windows: Intel NPU, NVIDIA/AMD GPU ---
-      if (Platform.isWindows) {
-        return await _detectComputeWindows();
-      }
-
-      // --- Linux: NVIDIA GPU, Intel NPU ---
-      if (Platform.isLinux) {
-        return await _detectComputeLinux();
-      }
+      if (Platform.isAndroid) return await _detectComputeAndroid();
+      if (Platform.isMacOS) return await _detectComputeMacOS();
+      if (Platform.isWindows) return await _detectComputeWindows();
+      if (Platform.isLinux) return await _detectComputeLinux();
     } catch (_) {}
-
     return _ComputeResult(ComputePreference.cpu, null);
   }
 
   static Future<_ComputeResult> _detectComputeAndroid() async {
-    // Qualcomm Hexagon DSP/NPU
-    final npuPaths = [
-      '/sys/class/misc/adsprpc-smd',
-      '/sys/devices/platform/soc/soc:qcom,dsp',
-    ];
+    final npuPaths = ['/sys/class/misc/adsprpc-smd', '/sys/devices/platform/soc/soc:qcom,dsp'];
     for (final path in npuPaths) {
       if (await File(path).exists()) {
         return _ComputeResult(ComputePreference.npu, 'Qualcomm Hexagon NPU');
       }
     }
-    // GPU fallback
-    if (await File('/dev/kgsl-3d0').exists()) {
-      return _ComputeResult(ComputePreference.gpu, 'Qualcomm Adreno GPU');
-    }
-    if (await File('/dev/mali0').exists()) {
-      return _ComputeResult(ComputePreference.gpu, 'ARM Mali GPU');
-    }
+    if (await File('/dev/kgsl-3d0').exists()) return _ComputeResult(ComputePreference.gpu, 'Qualcomm Adreno GPU');
+    if (await File('/dev/mali0').exists()) return _ComputeResult(ComputePreference.gpu, 'ARM Mali GPU');
     return _ComputeResult(ComputePreference.cpu, null);
   }
 
   static Future<_ComputeResult> _detectComputeMacOS() async {
-    // All Apple Silicon Macs have the Neural Engine
     final result = await Process.run('sysctl', ['-n', 'machdep.cpu.brand_string']);
     final brand = result.stdout.toString().trim();
-
-    // Check if Apple Silicon (M1/M2/M3/M4 — all have ANE)
     final siliconCheck = await Process.run('sysctl', ['-n', 'hw.optional.arm64']);
     if (siliconCheck.exitCode == 0 && siliconCheck.stdout.toString().trim() == '1') {
       return _ComputeResult(ComputePreference.npu, 'Apple Neural Engine ($brand)');
     }
-
-    // Intel Mac with discrete GPU
     return _ComputeResult(ComputePreference.gpu, 'Metal GPU ($brand)');
   }
 
   static Future<_ComputeResult> _detectComputeWindows() async {
-    // Check for Intel NPU (Meteor Lake, Lunar Lake, Arrow Lake)
     try {
-      final npuCheck = await Process.run('wmic', ['path', 'Win32_PnPEntity', 'where',
-        'Name like "%NPU%"', 'get', 'Name']);
+      final npuCheck = await Process.run('wmic', ['path', 'Win32_PnPEntity', 'where', 'Name like "%NPU%"', 'get', 'Name']);
       if (npuCheck.exitCode == 0 && npuCheck.stdout.toString().contains('NPU')) {
-        final name = npuCheck.stdout.toString().split('\n')
-            .where((l) => l.trim().isNotEmpty && !l.contains('Name'))
-            .firstOrNull?.trim();
+        final name = npuCheck.stdout.toString().split('\n').where((l) => l.trim().isNotEmpty && !l.contains('Name')).firstOrNull?.trim();
         return _ComputeResult(ComputePreference.npu, name ?? 'Intel NPU');
       }
     } catch (_) {}
-
-    // Check for NVIDIA or AMD GPU
     try {
       final gpuCheck = await Process.run('wmic', ['path', 'Win32_VideoController', 'get', 'Name']);
       if (gpuCheck.exitCode == 0) {
-        final lines = gpuCheck.stdout.toString().split('\n')
-            .where((l) => l.trim().isNotEmpty && !l.contains('Name'))
-            .toList();
+        final lines = gpuCheck.stdout.toString().split('\n').where((l) => l.trim().isNotEmpty && !l.contains('Name')).toList();
         if (lines.isNotEmpty) {
           final gpuName = lines.first.trim();
           if (gpuName.contains('NVIDIA') || gpuName.contains('AMD') || gpuName.contains('Arc')) {
@@ -233,48 +163,24 @@ class DeviceCapabilities {
         }
       }
     } catch (_) {}
-
     return _ComputeResult(ComputePreference.cpu, null);
   }
 
   static Future<_ComputeResult> _detectComputeLinux() async {
-    // Check for NVIDIA GPU
     try {
       final result = await Process.run('nvidia-smi', ['--query-gpu=name', '--format=csv,noheader']);
-      if (result.exitCode == 0) {
-        final name = result.stdout.toString().trim();
-        if (name.isNotEmpty) {
-          return _ComputeResult(ComputePreference.gpu, 'NVIDIA $name');
-        }
+      if (result.exitCode == 0 && result.stdout.toString().trim().isNotEmpty) {
+        return _ComputeResult(ComputePreference.gpu, 'NVIDIA ${result.stdout.toString().trim()}');
       }
     } catch (_) {}
-
-    // Check for Intel NPU via accel subsystem
     try {
-      final accel = Directory('/sys/class/accel');
-      if (await accel.exists()) {
+      if (await Directory('/sys/class/accel').exists()) {
         return _ComputeResult(ComputePreference.npu, 'Intel NPU (accel)');
       }
     } catch (_) {}
-
-    // Check for AMD GPU via /dev/dri
     try {
-      final dri = Directory('/dev/dri');
-      if (await dri.exists()) {
-        final result = await Process.run('lspci', ['-nn']);
-        if (result.exitCode == 0) {
-          final output = result.stdout.toString();
-          if (output.contains('NVIDIA')) {
-            return _ComputeResult(ComputePreference.gpu, 'NVIDIA GPU');
-          }
-          if (output.contains('AMD') && output.contains('VGA')) {
-            return _ComputeResult(ComputePreference.gpu, 'AMD GPU');
-          }
-        }
-        return _ComputeResult(ComputePreference.gpu, 'GPU (via DRI)');
-      }
+      if (await Directory('/dev/dri').exists()) return _ComputeResult(ComputePreference.gpu, 'GPU (via DRI)');
     } catch (_) {}
-
     return _ComputeResult(ComputePreference.cpu, null);
   }
 }
@@ -283,22 +189,4 @@ class _ComputeResult {
   final ComputePreference preference;
   final String? gpuName;
   _ComputeResult(this.preference, this.gpuName);
-}
-
-class DownloadedModel {
-  final String id;
-  final String name;
-  final int sizeMb;
-
-  const DownloadedModel({
-    required this.id,
-    required this.name,
-    required this.sizeMb,
-  });
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'name': name,
-        'size_mb': sizeMb,
-      };
 }

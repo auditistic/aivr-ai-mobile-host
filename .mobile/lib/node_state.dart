@@ -1,5 +1,5 @@
 import 'package:flutter/foundation.dart';
-import 'device_capabilities.dart';
+import 'device_capabilities_data.dart';
 
 /// Connection state to the AI Farm.
 enum FarmConnectionState { disconnected, connecting, connected, reconnecting }
