@@ -13,6 +13,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import 'screens/loading_model_screen.dart';
 import 'models.dart';
+import 'swarm_service.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -58,6 +59,7 @@ class _MainScreenState extends State<MainScreen> {
       TextEditingController(); // New Token Controller
   final CactusLM _cactusLM = CactusLM();
   final _uuid = const Uuid();
+  final SwarmService _swarm = SwarmService();
 
   // Model management
   String? _selectedModelId;
@@ -156,7 +158,14 @@ class _MainScreenState extends State<MainScreen> {
 
   Future<void> _initializeApp() async {
     await _getIpAddress();
+    await _swarm.initialize();
+    await _swarm.startDiscovery();
+    _swarm.activePeerCount.addListener(_onPeersChanged);
     await _startupCheck();
+  }
+
+  void _onPeersChanged() {
+    if (mounted) setState(() {});
   }
 
   Future<void> _startupCheck() async {
@@ -593,6 +602,7 @@ class _MainScreenState extends State<MainScreen> {
         ); // Keep legacy logs in sync just in case
         _pendingModelId = null;
       });
+      _swarm.updateState(activeModel: id);
       _serverLogs.add('[SYSTEM] Model $id loaded successfully');
     } catch (e) {
       _loadStatusNotifier.value = LoadStatus.error;
@@ -631,6 +641,7 @@ class _MainScreenState extends State<MainScreen> {
 
     if (_isServerRunning) {
       await _server?.close(force: true);
+      _swarm.updateState(isServerRunning: false);
       setState(() {
         _isServerRunning = false;
         _server = null;
@@ -641,6 +652,9 @@ class _MainScreenState extends State<MainScreen> {
         ..get('/v1/models', _handleListModels)
         ..get('/v1/internal/devices', _handleListDevices)
         ..get('/v1/internal/stats', _handleGetStats)
+        ..get('/v1/swarm/status', _handleSwarmStatus)
+        ..get('/v1/swarm/peers', _handleSwarmPeers)
+        ..post('/v1/swarm/dispatch', _handleSwarmDispatch)
         ..get('/', _handleHealthCheck);
 
       final handler = const Pipeline()
@@ -667,6 +681,11 @@ class _MainScreenState extends State<MainScreen> {
 
         _server = await io.serve(handler, '0.0.0.0', _port);
         await WakelockPlus.enable(); // Keep device awake
+        _swarm.updateState(
+          isServerRunning: true,
+          activeModel: _activeModelId,
+          serverPort: _port,
+        );
         setState(() => _isServerRunning = true);
       } catch (e) {
         debugPrint('Server error: $e');
@@ -945,9 +964,65 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
+  Future<Response> _handleSwarmStatus(Request request) async {
+    return Response.ok(
+      jsonEncode(_swarm.getSwarmStatus()),
+      headers: {'Content-Type': 'application/json'},
+    );
+  }
+
+  Future<Response> _handleSwarmPeers(Request request) async {
+    return Response.ok(
+      jsonEncode({
+        'object': 'list',
+        'data': _swarm.alivePeers.map((p) => p.toJson()).toList(),
+        'total': _swarm.alivePeers.length,
+      }),
+      headers: {'Content-Type': 'application/json'},
+    );
+  }
+
+  /// Dispatch a chat completion to the best available peer in the swarm.
+  /// Falls back to local inference if no peers are available.
+  Future<Response> _handleSwarmDispatch(Request request) async {
+    try {
+      final body = await request.readAsString();
+      final json = jsonDecode(body) as Map<String, dynamic>;
+
+      final peer = _swarm.selectPeerForTask();
+      if (peer != null) {
+        _serverLogs.add(
+          '[SWARM] Dispatching to ${peer.nodeId.substring(0, 8)} at ${peer.ip}',
+        );
+        final result = await _swarm.forwardRequest(peer, json);
+        if (result != null) {
+          result['_routed_to'] = peer.nodeId;
+          return Response.ok(
+            jsonEncode(result),
+            headers: {'Content-Type': 'application/json'},
+          );
+        }
+        _serverLogs.add('[SWARM] Peer failed, falling back to local');
+      }
+
+      // Fallback to local processing
+      return _handleChatCompletion(request);
+    } catch (e) {
+      return Response.internalServerError(
+        body: jsonEncode({'error': {'message': e.toString()}}),
+      );
+    }
+  }
+
   Future<Response> _handleHealthCheck(Request request) async {
     return Response.ok(
-      jsonEncode({'status': 'running'}),
+      jsonEncode({
+        'status': 'running',
+        'node_id': _swarm.nodeId,
+        'platform': _swarm.platform,
+        'swarm_peers': _swarm.alivePeers.length,
+        'active_model': _activeModelId,
+      }),
       headers: {'Content-Type': 'application/json'},
     );
   }
@@ -1507,6 +1582,45 @@ Widget _buildLockScreen() {
             ),
           ),
           const SizedBox(width: 8),
+          // Swarm peer count indicator
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            decoration: BoxDecoration(
+              color: _swarm.alivePeers.isNotEmpty
+                  ? Colors.cyan.withOpacity(0.1)
+                  : Colors.white.withOpacity(0.03),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                color: _swarm.alivePeers.isNotEmpty
+                    ? Colors.cyan.withOpacity(0.4)
+                    : Colors.white.withOpacity(0.05),
+              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.hub,
+                  size: 12,
+                  color: _swarm.alivePeers.isNotEmpty
+                      ? Colors.cyan
+                      : Colors.grey,
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  '${_swarm.totalNodes}',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    fontFamily: 'monospace',
+                    color: _swarm.alivePeers.isNotEmpty
+                        ? Colors.cyan
+                        : Colors.grey,
+                  ),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );
@@ -1524,6 +1638,8 @@ Widget _buildLockScreen() {
         return _buildSensorsTab();
       case 4:
         return _buildOpenAITab();
+      case 5:
+        return _buildSwarmTab();
       default:
         return _buildAgentTab();
     }
@@ -2737,6 +2853,286 @@ Widget _buildLockScreen() {
     );
   }
 
+  Widget _buildSwarmTab() {
+    final peers = _swarm.alivePeers;
+    final logs = _swarm.swarmLogs;
+
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Swarm status header
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.cyan.withOpacity(0.05),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.cyan.withOpacity(0.2)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.hub, color: Colors.cyan, size: 20),
+                    const SizedBox(width: 8),
+                    const Text(
+                      'SWARM MESH',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w900,
+                        color: Colors.cyan,
+                        letterSpacing: 2,
+                      ),
+                    ),
+                    const Spacer(),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: peers.isNotEmpty
+                            ? Colors.cyan.withOpacity(0.15)
+                            : Colors.grey.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        '${_swarm.totalNodes} NODE${_swarm.totalNodes != 1 ? 'S' : ''}',
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w800,
+                          color: peers.isNotEmpty ? Colors.cyan : Colors.grey,
+                          letterSpacing: 1,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                // Self node info
+                _buildSwarmNodeCard(
+                  nodeId: _swarm.nodeId,
+                  ip: _swarm.localIp ?? '0.0.0.0',
+                  port: 8080,
+                  platform: _swarm.platform,
+                  model: _activeModelId,
+                  isRunning: _isServerRunning,
+                  isSelf: true,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          // Peer nodes
+          Text(
+            'CONNECTED PEERS (${peers.length})',
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              color: Colors.grey[500],
+              letterSpacing: 1,
+            ),
+          ),
+          const SizedBox(height: 8),
+          if (peers.isEmpty)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.02),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.white.withOpacity(0.05)),
+              ),
+              child: Column(
+                children: [
+                  Icon(Icons.search, color: Colors.grey[700], size: 32),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Scanning for peers on LAN...',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.grey[600],
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Start the app on other devices on the same WiFi',
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: Colors.grey[700],
+                    ),
+                  ),
+                ],
+              ),
+            )
+          else
+            ...peers.map(
+              (p) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: _buildSwarmNodeCard(
+                  nodeId: p.nodeId,
+                  ip: p.ip,
+                  port: p.port,
+                  platform: p.platform,
+                  model: p.activeModel,
+                  isRunning: p.isServerRunning,
+                  isSelf: false,
+                ),
+              ),
+            ),
+          const SizedBox(height: 16),
+          // Swarm logs
+          Text(
+            'SWARM LOGS',
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              color: Colors.grey[500],
+              letterSpacing: 1,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.5),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.white.withOpacity(0.05)),
+              ),
+              child: ListView.builder(
+                reverse: true,
+                itemCount: logs.length,
+                itemBuilder: (ctx, i) {
+                  final log = logs[logs.length - 1 - i];
+                  final isError = log.contains('ERROR');
+                  final isPeer = log.contains('PEER');
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 2),
+                    child: Text(
+                      log,
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                        color: isError
+                            ? Colors.red[400]
+                            : (isPeer ? Colors.cyan[300] : Colors.grey[500]),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSwarmNodeCard({
+    required String nodeId,
+    required String ip,
+    required int port,
+    required String platform,
+    String? model,
+    required bool isRunning,
+    required bool isSelf,
+  }) {
+    final platformIcon = {
+      'android': Icons.phone_android,
+      'windows': Icons.desktop_windows,
+      'linux': Icons.computer,
+      'ios': Icons.phone_iphone,
+      'macos': Icons.laptop_mac,
+    }[platform] ?? Icons.devices;
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: isSelf
+            ? Colors.cyan.withOpacity(0.08)
+            : Colors.white.withOpacity(0.03),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: isSelf
+              ? Colors.cyan.withOpacity(0.3)
+              : Colors.white.withOpacity(0.06),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(platformIcon, color: Colors.cyan, size: 24),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      '${nodeId.substring(0, 8)}...',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        fontFamily: 'monospace',
+                        color: Colors.white,
+                      ),
+                    ),
+                    if (isSelf) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.cyan.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: const Text(
+                          'SELF',
+                          style: TextStyle(
+                            fontSize: 8,
+                            fontWeight: FontWeight.w900,
+                            color: Colors.cyan,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '$ip:$port  |  ${platform.toUpperCase()}  |  ${model ?? 'no model'}',
+                  style: TextStyle(
+                    fontSize: 9,
+                    fontFamily: 'monospace',
+                    color: Colors.grey[500],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: isRunning ? Colors.green : Colors.grey[700],
+              boxShadow: isRunning
+                  ? [BoxShadow(color: Colors.green.withOpacity(0.5), blurRadius: 6)]
+                  : null,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildNavigation() {
     final bool hasModel = _models.any((m) => m.isDownloaded);
 
@@ -2785,6 +3181,13 @@ Widget _buildLockScreen() {
             'OPENAI',
             !hasModel,
             Colors.blue,
+          ),
+          _buildNavItem(
+            5,
+            Icons.hub,
+            'SWARM',
+            false,
+            Colors.cyan,
           ),
         ],
       ),
@@ -2855,6 +3258,7 @@ Widget _buildLockScreen() {
   @override
   void dispose() {
     _server?.close(force: true);
+    _swarm.dispose();
     _inputController.dispose();
     super.dispose();
   }
