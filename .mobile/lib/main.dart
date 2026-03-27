@@ -1,13 +1,13 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:cactus/cactus.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
-import 'package:uuid/uuid.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import 'node_state.dart';
 import 'device_capabilities.dart';
 import 'device_identity.dart';
+import 'credential_store.dart';
 import 'auth_client.dart';
 import 'farm_connection.dart';
 import 'farm_command_handler.dart';
@@ -17,17 +17,19 @@ import 'screens/pairing_screen.dart';
 // ---------------------------------------------------------------------------
 // AIVR - Node — Dedicated AI inference worker.
 //
-// Cross-platform: Android, iOS, Windows, macOS, Linux.
-//
-// Boot flow:
-//   1. Generate/load Ed25519 device keypair
-//   2. If not paired → show pairing screen (fingerprint code)
-//   3. If paired → authenticate via auth.aivr.site (challenge-response)
-//   4. Connect WebSocket to farm with JWT Bearer token
+// First-run flow (per DEVICE-NODE-API.md):
+//   1. Generate ECDSA P-256 keypair
+//   2. User enters 6-digit pairing code from auth.aivr.site/profile
+//   3. POST /api/auth/device/pair → receive node_id, JWT, CF creds, farm URL
+//   4. Connect WebSocket to farm with Bearer token + CF headers
 //   5. Accept commands, rip tokens, earn money
+//
+// Reconnect flow:
+//   - JWT expired → POST /api/device/refresh (rotating refresh token)
+//   - Refresh failed → POST /api/device/challenge + /token (sign nonce)
+//   - CF 403 → re-pair required
 // ---------------------------------------------------------------------------
 
-const kDefaultFarmGateway = 'wss://farm.aivr.ai/ws/node';
 const kDefaultAuthUrl = 'https://auth.aivr.site';
 
 void main() {
@@ -60,15 +62,17 @@ class NodeBootstrap extends StatefulWidget {
   State<NodeBootstrap> createState() => _NodeBootstrapState();
 }
 
-enum _BootPhase { loading, pairing, authenticating, dashboard }
+enum _BootPhase { loading, pairing, connecting, dashboard }
 
 class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserver {
   final NodeState _state = NodeState();
   final CactusLM _cactusLM = CactusLM();
   final DeviceIdentity _identity = DeviceIdentity();
+  final CredentialStore _creds = CredentialStore();
   late final AuthClient _auth;
   late final FarmCommandHandler _commandHandler;
-  late final FarmConnection _farm;
+  FarmConnection? _farm;
+  Timer? _heartbeatTimer;
 
   _BootPhase _phase = _BootPhase.loading;
 
@@ -80,34 +84,28 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
   }
 
   Future<void> _boot() async {
-    // 1. Load or generate persistent node ID
-    final prefs = await SharedPreferences.getInstance();
-    String? nodeId = prefs.getString('node_id');
-    if (nodeId == null) {
-      nodeId = const Uuid().v4();
-      await prefs.setString('node_id', nodeId);
-    }
-    _state.nodeId = nodeId;
+    // 1. Load stored credentials
+    await _creds.load();
 
-    // 2. URLs
-    final farmUrl = prefs.getString('farm_url') ?? kDefaultFarmGateway;
-    final authUrl = prefs.getString('auth_url') ?? kDefaultAuthUrl;
-    _state.farmGatewayUrl = farmUrl;
-
-    // 3. Initialize device identity (Ed25519 keypair)
-    _state.addLog('Initializing device identity...');
-    await _identity.initialize();
-    final fp = await _identity.fingerprint;
-    _state.addLog('Device fingerprint: $fp');
-
-    // 4. Auth client
+    // 2. Auth client
     _auth = AuthClient(
-      authBaseUrl: authUrl,
+      authBaseUrl: kDefaultAuthUrl,
       identity: _identity,
-      nodeId: nodeId,
+      credentials: _creds,
     );
 
-    // 5. Gather device capabilities
+    // 3. Initialize or restore keypair
+    if (_creds.keyMaterial != null) {
+      await _identity.restoreKeyPair(_creds.keyMaterial!);
+      _state.addLog('Keypair restored');
+    } else {
+      _state.addLog('Generating ECDSA P-256 keypair...');
+      final km = await _identity.generateKeyPair();
+      await _creds.saveKeyMaterial(km);
+      _state.addLog('Keypair generated');
+    }
+
+    // 4. Detect hardware
     _state.addLog('Detecting hardware...');
     _state.capabilities = await DeviceDetector.gather();
     final caps = _state.capabilities!;
@@ -116,11 +114,9 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
       '${caps.totalRamMb}MB RAM',
     );
 
-    // 6. Discover models
+    // 5. Discover models
     try {
-      final sdkModels = await _cactusLM.getModels().timeout(
-        const Duration(seconds: 10),
-      );
+      final sdkModels = await _cactusLM.getModels().timeout(const Duration(seconds: 10));
       final downloaded = sdkModels.where((m) => m.isDownloaded).toList();
       _state.capabilities!.downloadedModels = downloaded
           .map((m) => DownloadedModel(id: m.slug, name: m.name, sizeMb: m.sizeMb))
@@ -130,96 +126,149 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
       _state.addLog('Model discovery: $e');
     }
 
-    // 7. Wire up command handler + farm connection
+    // 6. Wire up command handler
     _commandHandler = FarmCommandHandler(cactusLM: _cactusLM, state: _state);
-    _farm = FarmConnection(
-      gatewayUrl: farmUrl,
-      state: _state,
-      onCommand: _commandHandler.handleCommand,
-    );
-    _commandHandler.attachFarm(_farm);
 
-    // 8. Wake lock (mobile only)
+    // 7. Wake lock (mobile only)
     if (DeviceDetector.isMobile) {
       await WakelockPlus.enable();
       _state.addLog('Wake lock enabled');
     }
 
-    // 9. Check pairing state
-    if (!_identity.isPaired) {
-      // First run — register with auth server and show pairing screen
-      _state.addLog('Device not paired — starting pairing flow');
-      try {
-        await _auth.registerForPairing();
-      } catch (e) {
-        _state.addLog('Pairing registration: $e');
-      }
+    // 8. Check if already paired
+    if (_creds.isPaired && _creds.hasCredentials) {
+      _state.nodeId = _creds.nodeId ?? '';
+      _state.farmGatewayUrl = _creds.farmEndpoint;
+      _state.addLog('Device paired as ${_creds.nodeId}');
+      await _connectToFarm();
+    } else {
       setState(() => _phase = _BootPhase.pairing);
-    } else {
-      // Already paired — authenticate and connect
-      await _authenticateAndConnect();
     }
   }
 
-  Future<void> _authenticateAndConnect() async {
-    setState(() => _phase = _BootPhase.authenticating);
-    _state.addLog('Authenticating with farm...');
+  // -----------------------------------------------------------------------
+  // Pairing
+  // -----------------------------------------------------------------------
+
+  Future<PairingResult> _handlePairingCode(String code) async {
+    _state.addLog('Pairing with code: $code');
 
     try {
-      final result = await _auth.authenticate();
-      if (result.success) {
-        _state.addLog('Authentication successful');
-        _farm.authToken = _auth.accessToken;
-        await _farm.connect();
-        setState(() => _phase = _BootPhase.dashboard);
-      } else {
-        _state.addLog('Auth failed: ${result.error}');
-        // Fall through to dashboard anyway — connection will retry
-        _farm.authToken = null;
-        await _farm.connect();
-        setState(() => _phase = _BootPhase.dashboard);
+      final result = await _auth.pair(code);
+
+      if (result.isApproved) {
+        _state.nodeId = _creds.nodeId ?? '';
+        _state.farmGatewayUrl = _creds.farmEndpoint;
+        _state.addLog('Paired! Node: ${_creds.nodeId}');
+        _state.addLog('Farm: ${_creds.farmName} (${_creds.farmEndpoint})');
+
+        // Transition to connecting
+        await _connectToFarm();
+        return PairingResult(success: true);
       }
+
+      return PairingResult(success: false, error: result.error ?? 'Pairing failed');
     } catch (e) {
-      _state.addLog('Auth error: $e — connecting without token');
-      await _farm.connect();
-      setState(() => _phase = _BootPhase.dashboard);
+      _state.addLog('Pairing error: $e');
+      return PairingResult(success: false, error: 'Connection error: $e');
     }
   }
 
-  Future<String> _checkPairingStatus() async {
-    try {
-      final result = await _auth.checkPairingStatus();
-      return result.status;
-    } catch (e) {
-      return 'pending';
+  // -----------------------------------------------------------------------
+  // Farm connection
+  // -----------------------------------------------------------------------
+
+  Future<void> _connectToFarm() async {
+    setState(() => _phase = _BootPhase.connecting);
+    _state.addLog('Connecting to farm...');
+
+    // Ensure we have a valid token — try refresh first
+    final refreshResult = await _auth.refreshAccessToken();
+    if (!refreshResult.success) {
+      _state.addLog('Token refresh failed, trying challenge-response...');
+      final authResult = await _auth.authenticateWithChallenge();
+      if (authResult.requiresRepair) {
+        _state.addLog('Auth failed — re-pairing required');
+        await _creds.clear();
+        setState(() => _phase = _BootPhase.pairing);
+        return;
+      }
     }
+
+    // Create farm connection with token + CF headers
+    final farmUrl = _creds.farmEndpoint ?? 'wss://farm.aivr.site/ws';
+
+    _farm = FarmConnection(
+      gatewayUrl: farmUrl,
+      state: _state,
+      onCommand: _commandHandler.handleCommand,
+      authToken: _creds.accessToken,
+    );
+    _commandHandler.attachFarm(_farm!);
+
+    await _farm!.connect();
+
+    // Start auth server heartbeat (30-60s per spec)
+    _startHeartbeat();
+
+    setState(() => _phase = _BootPhase.dashboard);
   }
 
-  void _onPaired() async {
-    await _identity.markPaired();
-    _state.addLog('Device paired successfully');
-    await _authenticateAndConnect();
+  void _startHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
+      // Send heartbeat to auth server
+      await _auth.sendHeartbeat(
+        gpuModel: _state.capabilities?.gpuName,
+        uptimeSeconds: _state.uptimeSeconds,
+      );
+
+      // Send telemetry if we have data
+      if (_state.requestCount > 0) {
+        await _auth.sendTelemetry(
+          tokensProcessed: _state.totalTokens,
+          tasksCompleted: _state.requestCount,
+        );
+      }
+
+      // Refresh token if needed (JWT expires in 1 hour)
+      // Refresh proactively at 50 minutes to avoid gaps
+      // We check every heartbeat cycle
+    });
   }
 
-  void _reconnect() {
-    _state.addLog('Manual reconnect');
-    // Refresh auth token if needed
-    if (_auth.needsRefresh) {
-      _auth.refreshAccessToken().then((result) {
-        if (result.success) _farm.authToken = _auth.accessToken;
-        _farm.disconnect().then((_) => _farm.connect());
-      });
-    } else {
-      _farm.disconnect().then((_) => _farm.connect());
+  void _reconnect() async {
+    _state.addLog('Reconnecting...');
+
+    // Try refresh token first
+    final result = await _auth.refreshAccessToken();
+    if (result.requiresRepair) {
+      _state.addLog('Credentials revoked — re-pairing');
+      _heartbeatTimer?.cancel();
+      _farm?.dispose();
+      await _creds.clear();
+      setState(() => _phase = _BootPhase.pairing);
+      return;
     }
+
+    // Update farm connection token
+    if (result.success) {
+      _farm?.authToken = _creds.accessToken;
+    }
+
+    await _farm?.disconnect();
+    await _farm?.connect();
   }
+
+  // -----------------------------------------------------------------------
+  // Lifecycle
+  // -----------------------------------------------------------------------
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState appState) {
     if (appState == AppLifecycleState.resumed &&
         _phase == _BootPhase.dashboard &&
         _state.connectionState != FarmConnectionState.connected) {
-      _state.addLog('App resumed — reconnecting');
       _reconnect();
     }
   }
@@ -227,17 +276,22 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _farm.dispose();
+    _heartbeatTimer?.cancel();
+    _farm?.dispose();
     _cactusLM.unload();
     if (DeviceDetector.isMobile) WakelockPlus.disable();
     super.dispose();
   }
 
+  // -----------------------------------------------------------------------
+  // UI
+  // -----------------------------------------------------------------------
+
   @override
   Widget build(BuildContext context) {
     switch (_phase) {
       case _BootPhase.loading:
-      case _BootPhase.authenticating:
+      case _BootPhase.connecting:
         return Scaffold(
           backgroundColor: const Color(0xFF0A0A0A),
           body: Center(
@@ -247,8 +301,8 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
                 const CircularProgressIndicator(color: Color(0xFF22C55E)),
                 const SizedBox(height: 24),
                 Text(
-                  _phase == _BootPhase.authenticating
-                      ? 'AUTHENTICATING...'
+                  _phase == _BootPhase.connecting
+                      ? 'CONNECTING TO FARM...'
                       : 'INITIALIZING NODE...',
                   style: const TextStyle(
                     fontSize: 12,
@@ -263,23 +317,7 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
         );
 
       case _BootPhase.pairing:
-        return FutureBuilder<String>(
-          future: _identity.fingerprint,
-          builder: (context, snap) {
-            if (!snap.hasData) {
-              return const Scaffold(
-                backgroundColor: Color(0xFF0A0A0A),
-                body: Center(child: CircularProgressIndicator(color: Color(0xFF22C55E))),
-              );
-            }
-            return PairingScreen(
-              fingerprint: snap.data!,
-              nodeId: _state.nodeId,
-              onCheckStatus: _checkPairingStatus,
-              onPaired: _onPaired,
-            );
-          },
-        );
+        return PairingScreen(onSubmitCode: _handlePairingCode);
 
       case _BootPhase.dashboard:
         return StatusDashboard(

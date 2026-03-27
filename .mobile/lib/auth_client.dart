@@ -1,230 +1,293 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'device_identity.dart';
+import 'credential_store.dart';
 
-/// OAuth client for auth.aivr.site — challenge-response using Ed25519 device key.
+/// Auth client for auth.aivr.site — matches the AIVR Device Node API spec.
 ///
-/// Flow:
-///   1. POST /api/device/pair   — register public key, get pairing status
-///   2. POST /api/device/challenge — get a nonce to sign
-///   3. POST /api/device/token   — submit signed nonce, get JWT session token
-///   4. Use JWT as Bearer token on WebSocket to farm
+/// Two-layer auth:
+///   Layer 1: Cloudflare Edge (CF-Access-Client-Id/Secret headers)
+///   Layer 2: Application (Bearer JWT)
 ///
-/// The JWT is short-lived. Refresh before expiry.
+/// Pre-auth endpoints (/api/auth/device/*) don't need CF headers.
+/// Protected endpoints (/api/device/*) need both CF headers + JWT.
 class AuthClient {
-  final String authBaseUrl; // e.g. https://auth.aivr.site
+  final String authBaseUrl;
   final DeviceIdentity identity;
-  final String nodeId;
-
-  String? _accessToken;
-  String? _refreshToken;
-  DateTime? _tokenExpiry;
+  final CredentialStore credentials;
 
   AuthClient({
     required this.authBaseUrl,
     required this.identity,
-    required this.nodeId,
+    required this.credentials,
   });
 
-  /// Current access token (JWT). Null if not authenticated.
-  String? get accessToken => _accessToken;
-  bool get isAuthenticated =>
-      _accessToken != null &&
-      _tokenExpiry != null &&
-      DateTime.now().isBefore(_tokenExpiry!);
-
-  /// Headers used by the AIVR - Node app.
-  Map<String, String> get _headers => {
-        'Content-Type': 'application/json',
-        'User-Agent': 'AIVR-Node/2.1.0',
-      };
-
   // -----------------------------------------------------------------------
-  // Step 1: Register device for pairing
+  // PRE-AUTH: Pairing (no CF headers needed)
   // -----------------------------------------------------------------------
 
-  /// Submit public key to auth server. Returns pairing status.
-  /// Call this on first run — the farm portal will show the device as
-  /// "pending" until the user approves it.
-  Future<PairResult> registerForPairing() async {
-    final publicKey = await identity.publicKeyBase64;
-    final fingerprint = await identity.fingerprint;
+  /// POST /api/auth/device/pair
+  ///
+  /// Register device public key with a 6-digit pairing code from user's profile.
+  /// On success, returns node_id, tokens, CF credentials, and farm endpoint.
+  Future<PairResult> pair(String pairingCode) async {
+    final publicKey = await identity.publicKeySpkiBase64;
 
     final response = await http.post(
-      Uri.parse('$authBaseUrl/api/device/pair'),
-      headers: _headers,
+      Uri.parse('$authBaseUrl/api/auth/device/pair'),
+      headers: credentials.publicHeaders,
       body: jsonEncode({
-        'node_id': nodeId,
         'public_key': publicKey,
-        'fingerprint': fingerprint,
+        'pairing_code': pairingCode,
       }),
     );
 
     if (response.statusCode == 200 || response.statusCode == 201) {
       final data = jsonDecode(response.body) as Map<String, dynamic>;
-      final status = data['status'] as String? ?? 'pending';
+
+      // Save everything from the pair response
+      await credentials.savePairResponse(data);
+
       return PairResult(
         success: true,
-        status: status, // 'pending', 'approved', 'rejected'
-        message: data['message'] as String? ?? '',
+        status: data['status'] as String? ?? 'approved',
+        data: data,
       );
     }
 
-    return PairResult(
-      success: false,
-      status: 'error',
-      message: 'HTTP ${response.statusCode}: ${response.body}',
-    );
+    final error = _parseError(response);
+    return PairResult(success: false, status: 'error', error: error);
   }
 
-  /// Check if device has been approved on the farm portal.
+  /// GET /api/auth/device/pair/status
+  ///
+  /// Poll for approval (future use — current flow auto-approves).
   Future<PairResult> checkPairingStatus() async {
-    final fingerprint = await identity.fingerprint;
-
     final response = await http.get(
-      Uri.parse('$authBaseUrl/api/device/pair/status?node_id=$nodeId&fingerprint=$fingerprint'),
-      headers: _headers,
+      Uri.parse(
+        '$authBaseUrl/api/auth/device/pair/status'
+        '?node_id=${credentials.nodeId}&fingerprint=${credentials.fingerprint}',
+      ),
+      headers: credentials.publicHeaders,
     );
 
     if (response.statusCode == 200) {
       final data = jsonDecode(response.body) as Map<String, dynamic>;
-      return PairResult(
-        success: true,
-        status: data['status'] as String? ?? 'pending',
-        message: data['message'] as String?,
-      );
+      final status = data['status'] as String? ?? 'pending';
+
+      // If approved, save the full credentials
+      if (status == 'approved' && data.containsKey('access_token')) {
+        await credentials.savePairResponse(data);
+      }
+
+      return PairResult(success: true, status: status, data: data);
     }
 
-    return PairResult(
-      success: false,
-      status: 'error',
-      message: 'HTTP ${response.statusCode}',
-    );
+    if (response.statusCode == 403) {
+      return PairResult(success: false, status: 'revoked', error: 'Device revoked');
+    }
+
+    return PairResult(success: false, status: 'error', error: _parseError(response));
   }
 
   // -----------------------------------------------------------------------
-  // Step 2 + 3: Challenge-response authentication
+  // PROTECTED: Challenge-Response Auth (needs CF headers)
   // -----------------------------------------------------------------------
 
-  /// Authenticate with the auth server using Ed25519 signed challenge.
-  /// Returns true if we got a valid session token.
-  Future<AuthResult> authenticate() async {
-    // Step 2: Get challenge nonce
-    final challengeResponse = await http.post(
+  /// POST /api/device/challenge → POST /api/device/token
+  ///
+  /// Get a nonce, sign it, exchange for fresh JWT.
+  Future<AuthResult> authenticateWithChallenge() async {
+    // Step 1: Get challenge nonce
+    final challengeRes = await http.post(
       Uri.parse('$authBaseUrl/api/device/challenge'),
-      headers: _headers,
-      body: jsonEncode({'node_id': nodeId}),
+      headers: credentials.protectedHeaders,
     );
 
-    if (challengeResponse.statusCode != 200) {
-      return AuthResult(
-        success: false,
-        error: 'Challenge failed: HTTP ${challengeResponse.statusCode}',
-      );
+    if (challengeRes.statusCode == 403) {
+      return AuthResult(success: false, error: 'CF access denied — re-pair required', requiresRepair: true);
+    }
+    if (challengeRes.statusCode == 401) {
+      return AuthResult(success: false, error: 'JWT expired — refresh first');
+    }
+    if (challengeRes.statusCode != 200) {
+      return AuthResult(success: false, error: 'Challenge failed: HTTP ${challengeRes.statusCode}');
     }
 
-    final challengeData = jsonDecode(challengeResponse.body) as Map<String, dynamic>;
-    final challenge = challengeData['challenge'] as String? ?? '';
-
-    if (challenge.isEmpty) {
-      return AuthResult(success: false, error: 'Empty challenge from server');
+    final challengeData = jsonDecode(challengeRes.body) as Map<String, dynamic>;
+    final nonce = challengeData['nonce'] as String? ?? '';
+    if (nonce.isEmpty) {
+      return AuthResult(success: false, error: 'Empty nonce from server');
     }
 
-    // Step 3: Sign challenge and exchange for token
-    final signature = await identity.signChallenge(challenge);
+    // Step 2: Sign nonce with private key
+    final signature = await identity.signNonce(nonce);
 
-    final tokenResponse = await http.post(
+    // Step 3: Exchange for token
+    final tokenRes = await http.post(
       Uri.parse('$authBaseUrl/api/device/token'),
-      headers: _headers,
+      headers: credentials.protectedHeaders,
       body: jsonEncode({
-        'node_id': nodeId,
-        'challenge': challenge,
+        'node_id': credentials.nodeId,
+        'nonce': nonce,
         'signature': signature,
       }),
     );
 
-    if (tokenResponse.statusCode == 200) {
-      final tokenData = jsonDecode(tokenResponse.body) as Map<String, dynamic>;
-      _accessToken = tokenData['access_token'] as String?;
-      _refreshToken = tokenData['refresh_token'] as String?;
-
-      final expiresIn = tokenData['expires_in'] as int? ?? 3600;
-      _tokenExpiry = DateTime.now().add(Duration(seconds: expiresIn));
-
+    if (tokenRes.statusCode == 200) {
+      final data = jsonDecode(tokenRes.body) as Map<String, dynamic>;
+      await credentials.updateTokens(
+        accessToken: data['access_token'] as String,
+      );
       return AuthResult(success: true);
     }
 
-    return AuthResult(
-      success: false,
-      error: 'Token exchange failed: HTTP ${tokenResponse.statusCode}: ${tokenResponse.body}',
-    );
+    if (tokenRes.statusCode == 403) {
+      return AuthResult(success: false, error: 'Device revoked', requiresRepair: true);
+    }
+
+    return AuthResult(success: false, error: 'Token exchange failed: ${_parseError(tokenRes)}');
   }
 
   // -----------------------------------------------------------------------
-  // Token refresh
+  // PROTECTED: Token Refresh (rotating refresh token)
   // -----------------------------------------------------------------------
 
-  /// Refresh the access token before it expires.
+  /// POST /api/device/refresh
+  ///
+  /// Refresh expired JWT. IMPORTANT: refresh token rotates — save the new one.
   Future<AuthResult> refreshAccessToken() async {
-    if (_refreshToken == null) {
-      return AuthResult(success: false, error: 'No refresh token');
+    if (credentials.refreshToken == null) {
+      return AuthResult(success: false, error: 'No refresh token', requiresRepair: true);
     }
 
     final response = await http.post(
       Uri.parse('$authBaseUrl/api/device/refresh'),
-      headers: _headers,
+      headers: credentials.protectedHeaders,
       body: jsonEncode({
-        'node_id': nodeId,
-        'refresh_token': _refreshToken,
+        'refresh_token': credentials.refreshToken,
       }),
     );
 
     if (response.statusCode == 200) {
       final data = jsonDecode(response.body) as Map<String, dynamic>;
-      _accessToken = data['access_token'] as String?;
-      final expiresIn = data['expires_in'] as int? ?? 3600;
-      _tokenExpiry = DateTime.now().add(Duration(seconds: expiresIn));
-
-      if (data.containsKey('refresh_token')) {
-        _refreshToken = data['refresh_token'] as String?;
-      }
-
+      await credentials.updateTokens(
+        accessToken: data['access_token'] as String,
+        refreshToken: data['refresh_token'] as String?, // Rotated!
+      );
       return AuthResult(success: true);
     }
 
-    // Refresh failed — need full re-auth
-    _accessToken = null;
-    _refreshToken = null;
-    _tokenExpiry = null;
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      return AuthResult(
+        success: false,
+        error: 'Refresh token invalid/revoked — re-pair required',
+        requiresRepair: true,
+      );
+    }
+
     return AuthResult(success: false, error: 'Refresh failed: HTTP ${response.statusCode}');
   }
 
-  /// Check if token needs refresh (within 5 min of expiry).
-  bool get needsRefresh =>
-      _tokenExpiry != null &&
-      DateTime.now().isAfter(_tokenExpiry!.subtract(const Duration(minutes: 5)));
+  // -----------------------------------------------------------------------
+  // PROTECTED: Heartbeat + Telemetry
+  // -----------------------------------------------------------------------
 
-  /// Clear all tokens (logout).
-  void clearTokens() {
-    _accessToken = null;
-    _refreshToken = null;
-    _tokenExpiry = null;
+  /// POST /api/device/heartbeat
+  Future<bool> sendHeartbeat({
+    double? cpuUsage,
+    double? memoryUsage,
+    double? gpuUsage,
+    String? gpuModel,
+    int? uptimeSeconds,
+  }) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$authBaseUrl/api/device/heartbeat'),
+        headers: credentials.protectedHeaders,
+        body: jsonEncode({
+          if (cpuUsage != null) 'cpu_usage': cpuUsage,
+          if (memoryUsage != null) 'memory_usage': memoryUsage,
+          if (gpuUsage != null) 'gpu_usage': gpuUsage,
+          if (gpuModel != null) 'gpu_model': gpuModel,
+          if (uptimeSeconds != null) 'uptime_seconds': uptimeSeconds,
+        }),
+      );
+      return response.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// POST /api/device/data
+  Future<bool> sendTelemetry({
+    required int tokensProcessed,
+    required int tasksCompleted,
+    int errors = 0,
+    double? avgLatencyMs,
+  }) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$authBaseUrl/api/device/data'),
+        headers: credentials.protectedHeaders,
+        body: jsonEncode({
+          'type': 'telemetry',
+          'metrics': {
+            'tokens_processed': tokensProcessed,
+            'tasks_completed': tasksCompleted,
+            'errors': errors,
+            if (avgLatencyMs != null) 'avg_latency_ms': avgLatencyMs,
+          },
+        }),
+      );
+      return response.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// GET /api/device/status
+  Future<Map<String, dynamic>?> getDeviceStatus() async {
+    try {
+      final response = await http.get(
+        Uri.parse('$authBaseUrl/api/device/status'),
+        headers: credentials.protectedHeaders,
+      );
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  // -----------------------------------------------------------------------
+  // Helpers
+  // -----------------------------------------------------------------------
+
+  String _parseError(http.Response response) {
+    try {
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      return data['error'] as String? ?? 'HTTP ${response.statusCode}';
+    } catch (_) {
+      return 'HTTP ${response.statusCode}: ${response.body}';
+    }
   }
 }
 
 class PairResult {
   final bool success;
-  final String status; // 'pending', 'approved', 'rejected', 'error'
-  final String? message;
+  final String status; // 'approved', 'pending', 'revoked', 'error'
+  final String? error;
+  final Map<String, dynamic>? data;
 
-  PairResult({required this.success, required this.status, this.message});
+  PairResult({required this.success, required this.status, this.error, this.data});
   bool get isApproved => status == 'approved';
-  bool get isPending => status == 'pending';
 }
 
 class AuthResult {
   final bool success;
   final String? error;
+  final bool requiresRepair;
 
-  AuthResult({required this.success, this.error});
+  AuthResult({required this.success, this.error, this.requiresRepair = false});
 }

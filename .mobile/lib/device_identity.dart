@@ -1,138 +1,146 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
-/// Device identity — Ed25519 keypair for secure farm authentication.
+/// Device identity — ECDSA P-256 keypair for secure farm authentication.
 ///
-/// On first run, generates an Ed25519 keypair. The private key is stored
-/// locally (SharedPreferences — should be moved to Android Keystore /
-/// iOS Keychain for production). The public key and fingerprint are sent
-/// to the farm during pairing.
-///
-/// Flow:
-///   1. First run → generate keypair → store
-///   2. Show pairing code (fingerprint) to user
-///   3. User enters code on farm portal → farm stores public key
-///   4. Device signs challenges from auth.aivr.site to prove identity
-///   5. Gets back a session JWT → connects to farm WebSocket
+/// Per AIVR Device Node API spec:
+///   - Generate ECDSA P-256 keypair on first run
+///   - Export public key as Base64-encoded SPKI
+///   - Sign nonces with SHA-256 for challenge-response auth
+///   - Private key NEVER leaves the device
 class DeviceIdentity {
-  static const _keyPrivate = 'device_private_key';
-  static const _keyPublic = 'device_public_key';
-  static const _keyPaired = 'device_paired';
-  static const _keyPairCode = 'device_pair_code';
+  final Ecdsa _ecdsa = Ecdsa.p256(Sha256());
 
-  final Ed25519 _ed25519 = Ed25519();
+  EcKeyPair? _keyPair;
+  EcPublicKey? _publicKey;
 
-  SimpleKeyPair? _keyPair;
-  SimplePublicKey? _publicKey;
-  bool _isPaired = false;
-  String? _pairCode;
-
-  bool get isPaired => _isPaired;
-  String? get pairCode => _pairCode;
-
-  /// Public key bytes (raw, 32 bytes).
-  Future<Uint8List> get publicKeyBytes async {
+  /// Raw public key bytes (uncompressed point, for internal use).
+  Future<List<int>> get publicKeyBytes async {
     final pk = await _keyPair!.extractPublicKey();
-    return Uint8List.fromList(pk.bytes);
+    return pk.x + pk.y;
   }
 
-  /// Public key as base64 (for API transport).
-  Future<String> get publicKeyBase64 async {
-    final bytes = await publicKeyBytes;
-    return base64Encode(bytes);
+  /// Public key as Base64-encoded SPKI format (what the server expects).
+  /// SPKI wraps the raw EC point with algorithm identifiers.
+  Future<String> get publicKeySpkiBase64 async {
+    final pk = await _keyPair!.extractPublicKey();
+
+    // Build SPKI structure for P-256:
+    // SEQUENCE {
+    //   SEQUENCE { OID ecPublicKey, OID prime256v1 }
+    //   BIT STRING { 0x04 || x || y }
+    // }
+    final xBytes = _padTo32(pk.x);
+    final yBytes = _padTo32(pk.y);
+
+    // Uncompressed EC point: 0x04 + 32 bytes X + 32 bytes Y = 65 bytes
+    final ecPoint = <int>[0x04, ...xBytes, ...yBytes];
+
+    // ASN.1 DER encoding of SPKI for P-256
+    // Algorithm identifier for EC + P-256 is fixed:
+    //   SEQUENCE { OID 1.2.840.10045.2.1, OID 1.2.840.10045.3.1.7 }
+    final algorithmId = <int>[
+      0x30, 0x13, // SEQUENCE, 19 bytes
+      0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01, // OID ecPublicKey
+      0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07, // OID prime256v1
+    ];
+
+    // BIT STRING wrapping: 0x03, length+1, 0x00 (no unused bits), then ecPoint
+    final bitString = <int>[
+      0x03, ecPoint.length + 1, 0x00, ...ecPoint,
+    ];
+
+    // Outer SEQUENCE
+    final innerLength = algorithmId.length + bitString.length;
+    final spki = <int>[
+      0x30, innerLength, ...algorithmId, ...bitString,
+    ];
+
+    return base64Encode(Uint8List.fromList(spki));
   }
 
-  /// Device fingerprint — short human-readable code derived from public key.
-  /// Format: XXXX-XXXX-XXXX (12 hex chars from SHA-256 of public key).
-  Future<String> get fingerprint async {
-    final bytes = await publicKeyBytes;
-    final hash = await Sha256().hash(bytes);
-    final hex = hash.bytes
-        .take(6)
-        .map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase())
-        .join();
-    return '${hex.substring(0, 4)}-${hex.substring(4, 8)}-${hex.substring(8, 12)}';
+  List<int> _padTo32(List<int> bytes) {
+    if (bytes.length >= 32) return bytes.sublist(bytes.length - 32);
+    return List<int>.filled(32 - bytes.length, 0) + bytes;
   }
 
-  /// Initialize — load existing keypair or generate new one.
-  Future<void> initialize() async {
-    final prefs = await SharedPreferences.getInstance();
-    final storedPrivate = prefs.getString(_keyPrivate);
-    final storedPublic = prefs.getString(_keyPublic);
+  /// Generate a new keypair. Returns the key material for storage.
+  Future<KeyMaterial> generateKeyPair() async {
+    final keyPair = await _ecdsa.newKeyPair();
+    _keyPair = keyPair;
+    _publicKey = await keyPair.extractPublicKey();
 
-    if (storedPrivate != null && storedPublic != null) {
-      // Restore existing keypair
-      final privateBytes = base64Decode(storedPrivate);
-      final publicBytes = base64Decode(storedPublic);
+    // Extract for storage
+    final d = await keyPair.extractPrivateKeyBytes();
+    final pk = _publicKey!;
 
-      _publicKey = SimplePublicKey(publicBytes, type: KeyPairType.ed25519);
-      _keyPair = SimpleKeyPairData(
-        privateBytes,
-        publicKey: _publicKey!,
-        type: KeyPairType.ed25519,
+    return KeyMaterial(
+      privateKeyD: base64Encode(d),
+      publicKeyX: base64Encode(Uint8List.fromList(pk.x)),
+      publicKeyY: base64Encode(Uint8List.fromList(pk.y)),
+      publicKeySpki: await publicKeySpkiBase64,
+    );
+  }
+
+  /// Restore keypair from stored material.
+  Future<void> restoreKeyPair(KeyMaterial material) async {
+    final d = base64Decode(material.privateKeyD);
+    final x = base64Decode(material.publicKeyX);
+    final y = base64Decode(material.publicKeyY);
+
+    _publicKey = EcPublicKey(
+      x: x,
+      y: y,
+      type: KeyPairType.p256,
+    );
+
+    _keyPair = EcKeyPairData(
+      d: d,
+      x: x,
+      y: y,
+      type: KeyPairType.p256,
+    );
+  }
+
+  bool get hasKeyPair => _keyPair != null;
+
+  /// Sign a nonce string with the private key (ECDSA P-256 + SHA-256).
+  /// Returns Base64-encoded DER signature.
+  Future<String> signNonce(String nonce) async {
+    if (_keyPair == null) throw StateError('No keypair loaded');
+
+    final data = utf8.encode(nonce);
+    final signature = await _ecdsa.sign(data, keyPair: _keyPair!);
+    return base64Encode(Uint8List.fromList(signature.bytes));
+  }
+}
+
+/// Serializable key material for secure storage.
+class KeyMaterial {
+  final String privateKeyD; // Base64-encoded private scalar
+  final String publicKeyX; // Base64-encoded X coordinate
+  final String publicKeyY; // Base64-encoded Y coordinate
+  final String publicKeySpki; // Base64-encoded SPKI (for server)
+
+  KeyMaterial({
+    required this.privateKeyD,
+    required this.publicKeyX,
+    required this.publicKeyY,
+    required this.publicKeySpki,
+  });
+
+  Map<String, String> toJson() => {
+        'private_key_d': privateKeyD,
+        'public_key_x': publicKeyX,
+        'public_key_y': publicKeyY,
+        'public_key_spki': publicKeySpki,
+      };
+
+  factory KeyMaterial.fromJson(Map<String, dynamic> json) => KeyMaterial(
+        privateKeyD: json['private_key_d'] as String,
+        publicKeyX: json['public_key_x'] as String,
+        publicKeyY: json['public_key_y'] as String,
+        publicKeySpki: json['public_key_spki'] as String,
       );
-    } else {
-      // Generate new keypair
-      final newKeyPair = await _ed25519.newKeyPair();
-      final extractedPrivate = await newKeyPair.extractPrivateKeyBytes();
-      final extractedPublic = await newKeyPair.extractPublicKey();
-
-      _publicKey = extractedPublic as SimplePublicKey;
-      _keyPair = SimpleKeyPairData(
-        extractedPrivate,
-        publicKey: _publicKey!,
-        type: KeyPairType.ed25519,
-      );
-
-      // Store
-      await prefs.setString(_keyPrivate, base64Encode(extractedPrivate));
-      await prefs.setString(_keyPublic, base64Encode(extractedPublic.bytes));
-    }
-
-    _isPaired = prefs.getBool(_keyPaired) ?? false;
-    _pairCode = prefs.getString(_keyPairCode);
-
-    // Generate pair code if not set
-    if (_pairCode == null) {
-      _pairCode = await fingerprint;
-      await prefs.setString(_keyPairCode, _pairCode!);
-    }
-  }
-
-  /// Sign a challenge from the auth server to prove device identity.
-  /// Returns the signature as base64.
-  Future<String> signChallenge(String challenge) async {
-    final data = utf8.encode(challenge);
-    final signature = await _ed25519.sign(data, keyPair: _keyPair!);
-    return base64Encode(signature.bytes);
-  }
-
-  /// Mark device as paired (called after successful pairing with farm).
-  Future<void> markPaired() async {
-    _isPaired = true;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_keyPaired, true);
-  }
-
-  /// Unpair device (factory reset of identity).
-  Future<void> unpair() async {
-    _isPaired = false;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_keyPaired, false);
-  }
-
-  /// Full reset — delete keypair and pairing state.
-  Future<void> reset() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_keyPrivate);
-    await prefs.remove(_keyPublic);
-    await prefs.remove(_keyPaired);
-    await prefs.remove(_keyPairCode);
-    _keyPair = null;
-    _publicKey = null;
-    _isPaired = false;
-    _pairCode = null;
-  }
 }

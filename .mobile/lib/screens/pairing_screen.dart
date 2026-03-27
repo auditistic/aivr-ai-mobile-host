@@ -1,61 +1,71 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 /// First-run pairing screen.
 ///
-/// Shows the device fingerprint code (XXXX-XXXX-XXXX) that the user
-/// enters on the farm web portal to approve this node. Polls for
-/// approval status automatically.
+/// User goes to auth.aivr.site/profile → Devices tab to get a 6-digit
+/// pairing code, then enters it here. The app sends the code + public key
+/// to the server and receives credentials.
 class PairingScreen extends StatefulWidget {
-  final String fingerprint;
-  final String nodeId;
-  final Future<String> Function() onCheckStatus; // Returns: 'pending', 'approved', 'rejected'
-  final VoidCallback onPaired;
+  final Future<PairingResult> Function(String code) onSubmitCode;
 
   const PairingScreen({
     super.key,
-    required this.fingerprint,
-    required this.nodeId,
-    required this.onCheckStatus,
-    required this.onPaired,
+    required this.onSubmitCode,
   });
 
   @override
   State<PairingScreen> createState() => _PairingScreenState();
 }
 
+class PairingResult {
+  final bool success;
+  final String? error;
+  PairingResult({required this.success, this.error});
+}
+
 class _PairingScreenState extends State<PairingScreen> {
-  Timer? _pollTimer;
-  String _status = 'pending';
-  bool _copied = false;
+  final _controller = TextEditingController();
+  final _focusNode = FocusNode();
+  bool _submitting = false;
+  String? _error;
 
   @override
   void initState() {
     super.initState();
-    // Poll every 3 seconds for approval
-    _pollTimer = Timer.periodic(const Duration(seconds: 3), (_) => _checkStatus());
-  }
-
-  Future<void> _checkStatus() async {
-    try {
-      final status = await widget.onCheckStatus();
-      if (!mounted) return;
-      setState(() => _status = status);
-      if (status == 'approved') {
-        _pollTimer?.cancel();
-        await Future.delayed(const Duration(milliseconds: 500));
-        widget.onPaired();
-      }
-    } catch (_) {
-      // Keep polling silently
-    }
+    _focusNode.requestFocus();
   }
 
   @override
   void dispose() {
-    _pollTimer?.cancel();
+    _controller.dispose();
+    _focusNode.dispose();
     super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final code = _controller.text.trim();
+    if (code.length != 6 || int.tryParse(code) == null) {
+      setState(() => _error = 'Enter a valid 6-digit code');
+      return;
+    }
+
+    setState(() {
+      _submitting = true;
+      _error = null;
+    });
+
+    final result = await widget.onSubmitCode(code);
+
+    if (!mounted) return;
+
+    if (!result.success) {
+      setState(() {
+        _submitting = false;
+        _error = result.error ?? 'Pairing failed';
+      });
+    }
+    // On success, parent navigates away — no setState needed
   }
 
   @override
@@ -86,7 +96,6 @@ class _PairingScreenState extends State<PairingScreen> {
                 ),
               ),
               const SizedBox(height: 32),
-              // Title
               const Text(
                 'PAIR THIS DEVICE',
                 style: TextStyle(
@@ -99,7 +108,7 @@ class _PairingScreenState extends State<PairingScreen> {
               ),
               const SizedBox(height: 12),
               Text(
-                'Enter this code on your AIVR Farm portal\nto connect this device to your account.',
+                'Go to auth.aivr.site → Profile → Devices\nand enter the 6-digit pairing code below.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: 13,
@@ -108,73 +117,92 @@ class _PairingScreenState extends State<PairingScreen> {
                 ),
               ),
               const SizedBox(height: 40),
-              // Fingerprint code
-              GestureDetector(
-                onTap: () {
-                  Clipboard.setData(ClipboardData(text: widget.fingerprint));
-                  setState(() => _copied = true);
-                  Future.delayed(const Duration(seconds: 2), () {
-                    if (mounted) setState(() => _copied = false);
-                  });
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.05),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(
-                      color: const Color(0xFF22C55E).withOpacity(0.3),
-                      width: 2,
-                    ),
-                  ),
-                  child: Column(
-                    children: [
-                      Text(
-                        widget.fingerprint,
-                        style: const TextStyle(
-                          fontSize: 32,
-                          fontWeight: FontWeight.w900,
-                          fontFamily: 'monospace',
-                          color: Color(0xFF22C55E),
-                          letterSpacing: 4,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            _copied ? Icons.check : Icons.copy,
-                            size: 14,
-                            color: _copied ? const Color(0xFF22C55E) : Colors.grey[600],
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            _copied ? 'COPIED' : 'TAP TO COPY',
-                            style: TextStyle(
-                              fontSize: 10,
-                              fontWeight: FontWeight.w700,
-                              color: _copied ? const Color(0xFF22C55E) : Colors.grey[600],
-                              letterSpacing: 1,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
+              // 6-digit code input
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.05),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                    color: _error != null
+                        ? Colors.red.withOpacity(0.5)
+                        : const Color(0xFF22C55E).withOpacity(0.3),
+                    width: 2,
                   ),
                 ),
+                child: TextField(
+                  controller: _controller,
+                  focusNode: _focusNode,
+                  enabled: !_submitting,
+                  keyboardType: TextInputType.number,
+                  textAlign: TextAlign.center,
+                  maxLength: 6,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  style: const TextStyle(
+                    fontSize: 36,
+                    fontWeight: FontWeight.w900,
+                    fontFamily: 'monospace',
+                    color: Color(0xFF22C55E),
+                    letterSpacing: 12,
+                  ),
+                  decoration: const InputDecoration(
+                    border: InputBorder.none,
+                    counterText: '',
+                    hintText: '000000',
+                    hintStyle: TextStyle(
+                      color: Colors.white10,
+                      fontSize: 36,
+                      fontWeight: FontWeight.w900,
+                      fontFamily: 'monospace',
+                      letterSpacing: 12,
+                    ),
+                  ),
+                  onSubmitted: (_) => _submit(),
+                ),
               ),
-              const SizedBox(height: 32),
-              // Status indicator
-              _buildStatusIndicator(),
               const SizedBox(height: 16),
-              // Node ID (small)
-              Text(
-                'Node: ${widget.nodeId.substring(0, 8)}...',
-                style: TextStyle(
-                  fontSize: 10,
-                  fontFamily: 'monospace',
-                  color: Colors.grey[700],
+              // Error message
+              if (_error != null)
+                Text(
+                  _error!,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.red,
+                  ),
+                ),
+              const SizedBox(height: 24),
+              // Submit button
+              SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: ElevatedButton(
+                  onPressed: _submitting ? null : _submit,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF22C55E),
+                    disabledBackgroundColor: const Color(0xFF22C55E).withOpacity(0.3),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                  child: _submitting
+                      ? const SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.black,
+                          ),
+                        )
+                      : const Text(
+                          'PAIR DEVICE',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w900,
+                            color: Colors.black,
+                            letterSpacing: 1,
+                          ),
+                        ),
                 ),
               ),
               const Spacer(flex: 3),
@@ -182,71 +210,6 @@ class _PairingScreenState extends State<PairingScreen> {
           ),
         ),
       ),
-    );
-  }
-
-  Widget _buildStatusIndicator() {
-    if (_status == 'approved') {
-      return Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(Icons.check_circle, color: Color(0xFF22C55E), size: 20),
-          const SizedBox(width: 8),
-          const Text(
-            'PAIRED SUCCESSFULLY',
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w900,
-              color: Color(0xFF22C55E),
-              letterSpacing: 1,
-            ),
-          ),
-        ],
-      );
-    }
-
-    if (_status == 'rejected') {
-      return Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(Icons.cancel, color: Colors.red, size: 20),
-          const SizedBox(width: 8),
-          const Text(
-            'PAIRING REJECTED',
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w900,
-              color: Colors.red,
-              letterSpacing: 1,
-            ),
-          ),
-        ],
-      );
-    }
-
-    // Pending — show spinner
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        const SizedBox(
-          width: 16,
-          height: 16,
-          child: CircularProgressIndicator(
-            strokeWidth: 2,
-            color: Colors.amber,
-          ),
-        ),
-        const SizedBox(width: 12),
-        Text(
-          'WAITING FOR APPROVAL...',
-          style: TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w800,
-            color: Colors.amber.withOpacity(0.8),
-            letterSpacing: 1,
-          ),
-        ),
-      ],
     );
   }
 }
