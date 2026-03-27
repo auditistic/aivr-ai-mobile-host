@@ -1,4 +1,4 @@
-# AIVR Farm Node — API_SPEC.md
+# AIVR - Node — API_SPEC.md
 
 ## 1. WebSocket Protocol (Farm ↔ Node)
 

@@ -5,7 +5,7 @@ import 'node_state.dart';
 import 'device_capabilities_data.dart';
 
 // ---------------------------------------------------------------------------
-// AIVR Farm Node — Web Preview / Demo Mode
+// AIVR - Node — Web Preview / Demo Mode
 //
 // This entry point runs in a browser with simulated farm data so you can
 // see the UI without needing a real farm connection or Cactus SDK.
@@ -24,7 +24,7 @@ class FarmNodePreview extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'AIVR Farm Node — Preview',
+      title: 'AIVR - Node — Preview',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,

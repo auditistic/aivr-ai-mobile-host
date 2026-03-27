@@ -1,7 +1,7 @@
 {
     "schemaVersion": "2.0",
     "root": {
-        "name": "AIVR FARM NODE",
+        "name": "AIVR - NODE",
         "description": "Dedicated AI Farm worker node. Connects to farm via Cloudflare gateway, receives commands, runs inference, earns tokens.",
         "status": "COMPLETED",
         "children": [

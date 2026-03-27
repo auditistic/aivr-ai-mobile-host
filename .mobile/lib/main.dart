@@ -12,7 +12,7 @@ import 'farm_command_handler.dart';
 import 'screens/status_dashboard.dart';
 
 // ---------------------------------------------------------------------------
-// AIVR Farm Node — Dedicated AI inference worker.
+// AIVR - Node — Dedicated AI inference worker.
 //
 // Cross-platform: Android, iOS, Windows, macOS, Linux.
 //
@@ -41,7 +41,7 @@ class FarmNodeApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'AIVR Farm Node',
+      title: 'AIVR - Node',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,

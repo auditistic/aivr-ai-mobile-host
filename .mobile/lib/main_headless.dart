@@ -9,7 +9,7 @@ import 'farm_connection.dart';
 import 'farm_command_handler.dart';
 
 // ---------------------------------------------------------------------------
-// AIVR Farm Node — Headless CLI mode.
+// AIVR - Node — Headless CLI mode.
 //
 // For desktop/server deployments (Windows, macOS, Linux) where no GUI is
 // needed. Runs as a background process/service, connects to the AI Farm,
@@ -30,8 +30,8 @@ const kDefaultFarmGateway = 'wss://farm.aivr.ai/ws/node';
 Future<void> main(List<String> args) async {
   print('');
   print('  ╔══════════════════════════════════════╗');
-  print('  ║       AIVR FARM NODE (Headless)      ║');
-  print('  ║   Dedicated AI Inference Worker       ║');
+  print('  ║          AIVR - NODE (Headless)        ║');
+  print('  ║     Dedicated AI Inference Worker     ║');
   print('  ╚══════════════════════════════════════╝');
   print('');
 

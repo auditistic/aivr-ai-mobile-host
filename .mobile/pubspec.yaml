@@ -1,5 +1,5 @@
-name: aivr_farm_node
-description: Dedicated AI Farm worker node — earn tokens by contributing compute (mobile + desktop)
+name: aivr_node
+description: AIVR - Node — Dedicated AI Farm worker node, earn tokens by contributing compute
 publish_to: 'none'
 version: 2.1.0+1
 

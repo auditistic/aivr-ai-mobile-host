@@ -116,7 +116,7 @@ class _StatusDashboardState extends State<StatusDashboard> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'AIVR FARM NODE',
+                  'AIVR - NODE',
                   style: TextStyle(
                     fontSize: 20,
                     fontWeight: FontWeight.w900,

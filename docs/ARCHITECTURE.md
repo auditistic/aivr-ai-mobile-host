@@ -1,8 +1,8 @@
-# AIVR Farm Node — ARCHITECTURE.md
+# AIVR - Node — ARCHITECTURE.md
 
 ## 1. System Role: Dedicated AI Inference Worker
 
-**AIVR Farm Node** is a headless worker that connects to the AIVR AI Farm via Cloudflare gateway. It does one thing: run LLM inference on mobile hardware and earn tokens.
+**AIVR - Node** is a headless worker that connects to the AIVR AI Farm via Cloudflare gateway. It does one thing: run LLM inference on mobile hardware and earn tokens.
 
 The user installs the app, it auto-connects to the farm, and the farm controls everything from there: which model to download, when to load it, and what inference requests to serve.
 
