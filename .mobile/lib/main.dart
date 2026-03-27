@@ -7,28 +7,28 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'node_state.dart';
 import 'device_capabilities.dart';
+import 'device_identity.dart';
+import 'auth_client.dart';
 import 'farm_connection.dart';
 import 'farm_command_handler.dart';
 import 'screens/status_dashboard.dart';
+import 'screens/pairing_screen.dart';
 
 // ---------------------------------------------------------------------------
 // AIVR - Node — Dedicated AI inference worker.
 //
 // Cross-platform: Android, iOS, Windows, macOS, Linux.
 //
-// This app does ONE thing: connect to the AI Farm via Cloudflare gateway,
-// accept commands (download model, load, inference), rip tokens, and
-// report earnings. No local chat, no model picker, no user options.
-//
-// Mobile: phone sits on a charger, wake-locked, earning tokens 24/7.
-// Desktop: runs as a background app/service, leveraging NPU/GPU.
-//
-// Token economy: users earn tokens by contributing device compute.
-// Tokens can be spent on their own AI usage or traded on the exchange.
+// Boot flow:
+//   1. Generate/load Ed25519 device keypair
+//   2. If not paired → show pairing screen (fingerprint code)
+//   3. If paired → authenticate via auth.aivr.site (challenge-response)
+//   4. Connect WebSocket to farm with JWT Bearer token
+//   5. Accept commands, rip tokens, earn money
 // ---------------------------------------------------------------------------
 
-/// Default farm gateway — override via SharedPreferences 'farm_url'.
 const kDefaultFarmGateway = 'wss://farm.aivr.ai/ws/node';
+const kDefaultAuthUrl = 'https://auth.aivr.site';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -53,7 +53,6 @@ class FarmNodeApp extends StatelessWidget {
   }
 }
 
-/// Bootstrap: initializes all services then shows the status dashboard.
 class NodeBootstrap extends StatefulWidget {
   const NodeBootstrap({super.key});
 
@@ -61,12 +60,17 @@ class NodeBootstrap extends StatefulWidget {
   State<NodeBootstrap> createState() => _NodeBootstrapState();
 }
 
+enum _BootPhase { loading, pairing, authenticating, dashboard }
+
 class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserver {
   final NodeState _state = NodeState();
   final CactusLM _cactusLM = CactusLM();
+  final DeviceIdentity _identity = DeviceIdentity();
+  late final AuthClient _auth;
   late final FarmCommandHandler _commandHandler;
   late final FarmConnection _farm;
-  bool _booted = false;
+
+  _BootPhase _phase = _BootPhase.loading;
 
   @override
   void initState() {
@@ -85,48 +89,49 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
     }
     _state.nodeId = nodeId;
 
-    // 2. Farm gateway URL (configurable, defaults to production)
+    // 2. URLs
     final farmUrl = prefs.getString('farm_url') ?? kDefaultFarmGateway;
+    final authUrl = prefs.getString('auth_url') ?? kDefaultAuthUrl;
     _state.farmGatewayUrl = farmUrl;
 
-    // 3. Gather device capabilities (cross-platform)
-    _state.addLog('Gathering device capabilities...');
-    _state.capabilities = await DeviceCapabilities.gather();
+    // 3. Initialize device identity (Ed25519 keypair)
+    _state.addLog('Initializing device identity...');
+    await _identity.initialize();
+    final fp = await _identity.fingerprint;
+    _state.addLog('Device fingerprint: $fp');
+
+    // 4. Auth client
+    _auth = AuthClient(
+      authBaseUrl: authUrl,
+      identity: _identity,
+      nodeId: nodeId,
+    );
+
+    // 5. Gather device capabilities
+    _state.addLog('Detecting hardware...');
+    _state.capabilities = await DeviceDetector.gather();
     final caps = _state.capabilities!;
     _state.addLog(
       '${caps.platform.toUpperCase()}: ${caps.cpuCores} cores, '
-      '${caps.totalRamMb}MB RAM, ${caps.availableStorageMb}MB storage',
-    );
-    _state.addLog(
-      'Compute: ${caps.computePreference.name.toUpperCase()}'
-      '${caps.gpuName != null ? " (${caps.gpuName})" : ""}',
+      '${caps.totalRamMb}MB RAM',
     );
 
-    // 4. Discover downloaded models from Cactus SDK
+    // 6. Discover models
     try {
       final sdkModels = await _cactusLM.getModels().timeout(
         const Duration(seconds: 10),
       );
       final downloaded = sdkModels.where((m) => m.isDownloaded).toList();
       _state.capabilities!.downloadedModels = downloaded
-          .map((m) => DownloadedModel(
-                id: m.slug,
-                name: m.name,
-                sizeMb: m.sizeMb,
-              ))
+          .map((m) => DownloadedModel(id: m.slug, name: m.name, sizeMb: m.sizeMb))
           .toList();
-      _state.addLog('Found ${downloaded.length} downloaded model(s)');
+      _state.addLog('Found ${downloaded.length} model(s)');
     } catch (e) {
       _state.addLog('Model discovery: $e');
     }
 
-    // 5. Wire up command handler
-    _commandHandler = FarmCommandHandler(
-      cactusLM: _cactusLM,
-      state: _state,
-    );
-
-    // 6. Create farm connection
+    // 7. Wire up command handler + farm connection
+    _commandHandler = FarmCommandHandler(cactusLM: _cactusLM, state: _state);
     _farm = FarmConnection(
       gatewayUrl: farmUrl,
       state: _state,
@@ -134,34 +139,89 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
     );
     _commandHandler.attachFarm(_farm);
 
-    // 7. Platform-specific setup
-    if (DeviceCapabilities.isMobile) {
-      // Mobile: keep device awake to serve inference 24/7
+    // 8. Wake lock (mobile only)
+    if (DeviceDetector.isMobile) {
       await WakelockPlus.enable();
-      _state.addLog('Wake lock enabled (mobile)');
-    } else {
-      _state.addLog('Desktop mode — no wake lock needed');
+      _state.addLog('Wake lock enabled');
     }
 
-    // 8. Auto-connect to farm
-    setState(() => _booted = true);
-    _farm.connect();
+    // 9. Check pairing state
+    if (!_identity.isPaired) {
+      // First run — register with auth server and show pairing screen
+      _state.addLog('Device not paired — starting pairing flow');
+      try {
+        await _auth.registerForPairing();
+      } catch (e) {
+        _state.addLog('Pairing registration: $e');
+      }
+      setState(() => _phase = _BootPhase.pairing);
+    } else {
+      // Already paired — authenticate and connect
+      await _authenticateAndConnect();
+    }
+  }
+
+  Future<void> _authenticateAndConnect() async {
+    setState(() => _phase = _BootPhase.authenticating);
+    _state.addLog('Authenticating with farm...');
+
+    try {
+      final result = await _auth.authenticate();
+      if (result.success) {
+        _state.addLog('Authentication successful');
+        _farm.authToken = _auth.accessToken;
+        await _farm.connect();
+        setState(() => _phase = _BootPhase.dashboard);
+      } else {
+        _state.addLog('Auth failed: ${result.error}');
+        // Fall through to dashboard anyway — connection will retry
+        _farm.authToken = null;
+        await _farm.connect();
+        setState(() => _phase = _BootPhase.dashboard);
+      }
+    } catch (e) {
+      _state.addLog('Auth error: $e — connecting without token');
+      await _farm.connect();
+      setState(() => _phase = _BootPhase.dashboard);
+    }
+  }
+
+  Future<String> _checkPairingStatus() async {
+    try {
+      final result = await _auth.checkPairingStatus();
+      return result.status;
+    } catch (e) {
+      return 'pending';
+    }
+  }
+
+  void _onPaired() async {
+    await _identity.markPaired();
+    _state.addLog('Device paired successfully');
+    await _authenticateAndConnect();
+  }
+
+  void _reconnect() {
+    _state.addLog('Manual reconnect');
+    // Refresh auth token if needed
+    if (_auth.needsRefresh) {
+      _auth.refreshAccessToken().then((result) {
+        if (result.success) _farm.authToken = _auth.accessToken;
+        _farm.disconnect().then((_) => _farm.connect());
+      });
+    } else {
+      _farm.disconnect().then((_) => _farm.connect());
+    }
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState appState) {
-    if (appState == AppLifecycleState.resumed) {
-      // Reconnect if we lost connection while backgrounded
-      if (_state.connectionState != FarmConnectionState.connected) {
-        _state.addLog('App resumed — reconnecting...');
-        _farm.connect();
-      }
+    if (appState == AppLifecycleState.resumed &&
+        _phase == _BootPhase.dashboard &&
+        _state.connectionState != FarmConnectionState.connected) {
+      _state.addLog('App resumed — reconnecting');
+      _reconnect();
     }
-  }
-
-  void _reconnect() {
-    _state.addLog('Manual reconnect requested');
-    _farm.disconnect().then((_) => _farm.connect());
   }
 
   @override
@@ -169,41 +229,63 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
     WidgetsBinding.instance.removeObserver(this);
     _farm.dispose();
     _cactusLM.unload();
-    if (DeviceCapabilities.isMobile) {
-      WakelockPlus.disable();
-    }
+    if (DeviceDetector.isMobile) WakelockPlus.disable();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!_booted) {
-      return const Scaffold(
-        backgroundColor: Color(0xFF0A0A0A),
-        body: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              CircularProgressIndicator(color: Color(0xFF22C55E)),
-              SizedBox(height: 24),
-              Text(
-                'INITIALIZING NODE...',
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w900,
-                  color: Colors.white54,
-                  letterSpacing: 2,
+    switch (_phase) {
+      case _BootPhase.loading:
+      case _BootPhase.authenticating:
+        return Scaffold(
+          backgroundColor: const Color(0xFF0A0A0A),
+          body: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const CircularProgressIndicator(color: Color(0xFF22C55E)),
+                const SizedBox(height: 24),
+                Text(
+                  _phase == _BootPhase.authenticating
+                      ? 'AUTHENTICATING...'
+                      : 'INITIALIZING NODE...',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900,
+                    color: Colors.white54,
+                    letterSpacing: 2,
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
-      );
-    }
+        );
 
-    return StatusDashboard(
-      state: _state,
-      onReconnect: _reconnect,
-    );
+      case _BootPhase.pairing:
+        return FutureBuilder<String>(
+          future: _identity.fingerprint,
+          builder: (context, snap) {
+            if (!snap.hasData) {
+              return const Scaffold(
+                backgroundColor: Color(0xFF0A0A0A),
+                body: Center(child: CircularProgressIndicator(color: Color(0xFF22C55E))),
+              );
+            }
+            return PairingScreen(
+              fingerprint: snap.data!,
+              nodeId: _state.nodeId,
+              onCheckStatus: _checkPairingStatus,
+              onPaired: _onPaired,
+            );
+          },
+        );
+
+      case _BootPhase.dashboard:
+        return StatusDashboard(
+          state: _state,
+          onReconnect: _reconnect,
+        );
+    }
   }
 }

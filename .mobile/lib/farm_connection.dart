@@ -21,6 +21,9 @@ class FarmConnection {
   int _reconnectAttempts = 0;
   bool _intentionalDisconnect = false;
 
+  /// JWT auth token from auth.aivr.site — set before connect().
+  String? authToken;
+
   static const Duration _heartbeatInterval = Duration(seconds: 15);
   static const int _maxReconnectDelaySec = 32;
 
@@ -28,6 +31,7 @@ class FarmConnection {
     required this.gatewayUrl,
     required this.state,
     this.onCommand,
+    this.authToken,
   });
 
   bool get isConnected => _ws != null && state.connectionState == FarmConnectionState.connected;
@@ -40,8 +44,18 @@ class FarmConnection {
     state.addLog('Connecting to farm: $gatewayUrl');
 
     try {
+      // Build connection URL with node_id
+      final uri = '$gatewayUrl?node_id=${state.nodeId}';
+
+      // Connect with auth token as header if available
+      final headers = <String, dynamic>{};
+      if (authToken != null && authToken!.isNotEmpty) {
+        headers['Authorization'] = 'Bearer $authToken';
+      }
+
       _ws = await WebSocket.connect(
-        '$gatewayUrl?node_id=${state.nodeId}',
+        uri,
+        headers: headers,
       ).timeout(const Duration(seconds: 10));
 
       _reconnectAttempts = 0;

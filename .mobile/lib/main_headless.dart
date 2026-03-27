@@ -65,7 +65,7 @@ Future<void> main(List<String> args) async {
 
   print('  Node ID:  $nodeId');
   print('  Farm:     $farmUrl');
-  print('  Platform: ${DeviceCapabilities.isDesktop ? "Desktop" : "Mobile"}');
+  print('  Platform: ${DeviceDetector.isDesktop ? "Desktop" : "Mobile"}');
   print('');
 
   // State
@@ -75,7 +75,7 @@ Future<void> main(List<String> args) async {
 
   // Device capabilities
   print('  Detecting hardware...');
-  state.capabilities = await DeviceCapabilities.gather();
+  state.capabilities = await DeviceDetector.gather();
   final caps = state.capabilities!;
   print('  CPU:      ${caps.cpuCores} cores');
   print('  RAM:      ${caps.totalRamMb} MB');
