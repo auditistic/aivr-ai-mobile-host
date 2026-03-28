@@ -711,7 +711,7 @@ class _MainScreenState extends State<MainScreen> {
       final List<ChatMessage> chatMessages = messages.map((m) {
         final content = m['content'] ?? '';
         if (content.isNotEmpty) {
-          _serverLogs.add('  User: ${content.toString().split('\n').first}...');
+          _serverLogs.add('  User: [REDACTED]');
         }
         return ChatMessage(role: m['role'] ?? 'user', content: content);
       }).toList();
