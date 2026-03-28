@@ -31,7 +31,7 @@ class AuthClient {
   /// Register device public key with a 6-digit pairing code from user's profile.
   /// On success, returns node_id, tokens, CF credentials, and farm endpoint.
   Future<PairResult> pair(String pairingCode) async {
-    final publicKey = await identity.publicKeySpkiBase64;
+    final publicKey = identity.publicKeySpkiBase64;
 
     final response = await http.post(
       Uri.parse('$authBaseUrl/api/auth/device/pair'),
@@ -121,7 +121,7 @@ class AuthClient {
     }
 
     // Step 2: Sign nonce with private key
-    final signature = await identity.signNonce(nonce);
+    final signature = identity.signNonce(nonce);
 
     // Step 3: Exchange for token
     final tokenRes = await http.post(

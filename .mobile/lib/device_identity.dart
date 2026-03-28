@@ -1,9 +1,11 @@
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
-import 'package:cryptography/cryptography.dart';
-import 'package:cryptography_flutter/cryptography_flutter.dart';
+import 'package:pointycastle/export.dart';
 
 /// Device identity — ECDSA P-256 keypair for secure farm authentication.
+///
+/// Uses pointycastle (pure Dart, works on all platforms including Android).
 ///
 /// Per AIVR Device Node API spec:
 ///   - Generate ECDSA P-256 keypair on first run
@@ -11,125 +13,141 @@ import 'package:cryptography_flutter/cryptography_flutter.dart';
 ///   - Sign nonces with SHA-256 for challenge-response auth
 ///   - Private key NEVER leaves the device
 class DeviceIdentity {
-  late final Ecdsa _ecdsa;
+  ECPrivateKey? _privateKey;
+  ECPublicKey? _publicKey;
 
-  EcKeyPair? _keyPair;
-  EcPublicKey? _publicKey;
+  static final ECDomainParameters _params = ECCurve_secp256r1();
 
-  DeviceIdentity() {
-    // Use FlutterCryptography for platform-native ECDSA (Android/iOS)
-    // Falls back to pure Dart on desktop
-    FlutterCryptography.enable();
-    _ecdsa = Ecdsa.p256(Sha256());
-  }
-
-  /// Raw public key bytes (uncompressed point, for internal use).
-  Future<List<int>> get publicKeyBytes async {
-    final pk = await _keyPair!.extractPublicKey();
-    return pk.x + pk.y;
-  }
+  bool get hasKeyPair => _privateKey != null && _publicKey != null;
 
   /// Public key as Base64-encoded SPKI format (what the server expects).
-  /// SPKI wraps the raw EC point with algorithm identifiers.
-  Future<String> get publicKeySpkiBase64 async {
-    final pk = await _keyPair!.extractPublicKey();
+  String get publicKeySpkiBase64 {
+    if (_publicKey == null) throw StateError('No keypair loaded');
 
-    // Build SPKI structure for P-256:
-    // SEQUENCE {
-    //   SEQUENCE { OID ecPublicKey, OID prime256v1 }
-    //   BIT STRING { 0x04 || x || y }
-    // }
-    final xBytes = _padTo32(pk.x);
-    final yBytes = _padTo32(pk.y);
+    final q = _publicKey!.Q!;
+    final xBytes = _padTo32(q.x!.toBigInteger()!);
+    final yBytes = _padTo32(q.y!.toBigInteger()!);
 
-    // Uncompressed EC point: 0x04 + 32 bytes X + 32 bytes Y = 65 bytes
+    // Uncompressed EC point: 0x04 + 32 bytes X + 32 bytes Y
     final ecPoint = <int>[0x04, ...xBytes, ...yBytes];
 
-    // ASN.1 DER encoding of SPKI for P-256
-    // Algorithm identifier for EC + P-256 is fixed:
-    //   SEQUENCE { OID 1.2.840.10045.2.1, OID 1.2.840.10045.3.1.7 }
+    // ASN.1 DER SPKI for P-256
     final algorithmId = <int>[
-      0x30, 0x13, // SEQUENCE, 19 bytes
+      0x30, 0x13,
       0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01, // OID ecPublicKey
       0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07, // OID prime256v1
     ];
 
-    // BIT STRING wrapping: 0x03, length+1, 0x00 (no unused bits), then ecPoint
-    final bitString = <int>[
-      0x03, ecPoint.length + 1, 0x00, ...ecPoint,
-    ];
-
-    // Outer SEQUENCE
+    final bitString = <int>[0x03, ecPoint.length + 1, 0x00, ...ecPoint];
     final innerLength = algorithmId.length + bitString.length;
-    final spki = <int>[
-      0x30, innerLength, ...algorithmId, ...bitString,
-    ];
+    final spki = <int>[0x30, innerLength, ...algorithmId, ...bitString];
 
     return base64Encode(Uint8List.fromList(spki));
   }
 
-  List<int> _padTo32(List<int> bytes) {
-    if (bytes.length >= 32) return bytes.sublist(bytes.length - 32);
-    return List<int>.filled(32 - bytes.length, 0) + bytes;
-  }
-
   /// Generate a new keypair. Returns the key material for storage.
-  Future<KeyMaterial> generateKeyPair() async {
-    final keyPair = await _ecdsa.newKeyPair();
-    _keyPair = keyPair;
-    _publicKey = await keyPair.extractPublicKey();
+  KeyMaterial generateKeyPair() {
+    final secureRandom = FortunaRandom();
+    final seedSource = Random.secure();
+    final seeds = List<int>.generate(32, (_) => seedSource.nextInt(256));
+    secureRandom.seed(KeyParameter(Uint8List.fromList(seeds)));
 
-    // Extract private key data for storage
-    final extracted = await keyPair.extract();
-    final pk = _publicKey!;
+    final keyGen = ECKeyGenerator()
+      ..init(ParametersWithRandom(
+        ECKeyGeneratorParameters(_params),
+        secureRandom,
+      ));
+
+    final pair = keyGen.generateKeyPair();
+    _privateKey = pair.privateKey as ECPrivateKey;
+    _publicKey = pair.publicKey as ECPublicKey;
+
+    final d = _privateKey!.d!;
+    final q = _publicKey!.Q!;
 
     return KeyMaterial(
-      privateKeyD: base64Encode(Uint8List.fromList(extracted.d)),
-      publicKeyX: base64Encode(Uint8List.fromList(pk.x)),
-      publicKeyY: base64Encode(Uint8List.fromList(pk.y)),
-      publicKeySpki: await publicKeySpkiBase64,
+      privateKeyD: base64Encode(Uint8List.fromList(_bigIntToBytes(d))),
+      publicKeyX: base64Encode(Uint8List.fromList(_padTo32(q.x!.toBigInteger()!))),
+      publicKeyY: base64Encode(Uint8List.fromList(_padTo32(q.y!.toBigInteger()!))),
+      publicKeySpki: publicKeySpkiBase64,
     );
   }
 
   /// Restore keypair from stored material.
-  Future<void> restoreKeyPair(KeyMaterial material) async {
-    final d = base64Decode(material.privateKeyD);
-    final x = base64Decode(material.publicKeyX);
-    final y = base64Decode(material.publicKeyY);
+  void restoreKeyPair(KeyMaterial material) {
+    final d = _bytesToBigInt(base64Decode(material.privateKeyD));
+    final x = _bytesToBigInt(base64Decode(material.publicKeyX));
+    final y = _bytesToBigInt(base64Decode(material.publicKeyY));
 
-    _publicKey = EcPublicKey(
-      x: x,
-      y: y,
-      type: KeyPairType.p256,
-    );
-
-    _keyPair = EcKeyPairData(
-      d: d,
-      x: x,
-      y: y,
-      type: KeyPairType.p256,
-    );
+    final q = _params.curve.createPoint(x, y);
+    _privateKey = ECPrivateKey(d, _params);
+    _publicKey = ECPublicKey(q, _params);
   }
-
-  bool get hasKeyPair => _keyPair != null;
 
   /// Sign a nonce string with the private key (ECDSA P-256 + SHA-256).
   /// Returns Base64-encoded DER signature.
-  Future<String> signNonce(String nonce) async {
-    if (_keyPair == null) throw StateError('No keypair loaded');
+  String signNonce(String nonce) {
+    if (_privateKey == null) throw StateError('No keypair loaded');
 
-    final data = utf8.encode(nonce);
-    final signature = await _ecdsa.sign(data, keyPair: _keyPair!);
-    return base64Encode(Uint8List.fromList(signature.bytes));
+    final signer = ECDSASigner(SHA256Digest())
+      ..init(true, PrivateKeyParameter<ECPrivateKey>(_privateKey!));
+
+    final data = Uint8List.fromList(utf8.encode(nonce));
+    final sig = signer.generateSignature(data) as ECSignature;
+
+    // Encode as DER
+    final rBytes = _bigIntToBytes(sig.r);
+    final sBytes = _bigIntToBytes(sig.s);
+
+    // DER INTEGER encoding (with leading 0x00 if high bit set)
+    final rDer = _derInteger(rBytes);
+    final sDer = _derInteger(sBytes);
+
+    final seqLen = rDer.length + sDer.length;
+    final der = <int>[0x30, seqLen, ...rDer, ...sDer];
+
+    return base64Encode(Uint8List.fromList(der));
+  }
+
+  // --- Helpers ---
+
+  List<int> _padTo32(BigInt value) {
+    final bytes = _bigIntToBytes(value);
+    if (bytes.length >= 32) return bytes.sublist(bytes.length - 32);
+    return List<int>.filled(32 - bytes.length, 0) + bytes;
+  }
+
+  List<int> _bigIntToBytes(BigInt value) {
+    var hex = value.toRadixString(16);
+    if (hex.length % 2 != 0) hex = '0$hex';
+    final bytes = <int>[];
+    for (var i = 0; i < hex.length; i += 2) {
+      bytes.add(int.parse(hex.substring(i, i + 2), radix: 16));
+    }
+    return bytes;
+  }
+
+  BigInt _bytesToBigInt(List<int> bytes) {
+    return BigInt.parse(
+      bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(),
+      radix: 16,
+    );
+  }
+
+  List<int> _derInteger(List<int> bytes) {
+    // Add leading 0x00 if high bit is set (positive integer)
+    final needsPad = bytes.isNotEmpty && bytes[0] >= 0x80;
+    final content = needsPad ? [0x00, ...bytes] : bytes;
+    return [0x02, content.length, ...content];
   }
 }
 
 /// Serializable key material for secure storage.
 class KeyMaterial {
-  final String privateKeyD; // Base64-encoded private scalar
-  final String publicKeyX; // Base64-encoded X coordinate
-  final String publicKeyY; // Base64-encoded Y coordinate
-  final String publicKeySpki; // Base64-encoded SPKI (for server)
+  final String privateKeyD;
+  final String publicKeyX;
+  final String publicKeyY;
+  final String publicKeySpki;
 
   KeyMaterial({
     required this.privateKeyD,

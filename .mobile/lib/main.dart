@@ -96,11 +96,11 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
 
     // 3. Initialize or restore keypair
     if (_creds.keyMaterial != null) {
-      await _identity.restoreKeyPair(_creds.keyMaterial!);
+      _identity.restoreKeyPair(_creds.keyMaterial!);
       _state.addLog('Keypair restored');
     } else {
       _state.addLog('Generating ECDSA P-256 keypair...');
-      final km = await _identity.generateKeyPair();
+      final km = _identity.generateKeyPair();
       await _creds.saveKeyMaterial(km);
       _state.addLog('Keypair generated');
     }
