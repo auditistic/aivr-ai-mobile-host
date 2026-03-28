@@ -189,13 +189,16 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
       debugPrint('[BOOT] Running auth priority chain...');
       final authResult = await _auth.ensureAuthenticated();
       if (authResult.requiresRepair) {
-        _state.addLog('Auth failed — re-pairing required');
+        // ONLY clear creds if server explicitly said device is revoked (403)
+        _state.addLog('Device revoked by server — re-pairing required');
         await _creds.clear();
         setState(() => _phase = _BootPhase.pairing);
         return;
       }
       if (!authResult.success) {
-        _state.addLog('Auth failed: ${authResult.error} — trying anyway');
+        // Auth failed (network error, etc) — DON'T clear creds, just proceed
+        // The farm connection will retry and we'll re-auth later
+        _state.addLog('Auth: ${authResult.error} — proceeding with cached token');
       }
     }
 
@@ -244,10 +247,11 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
   void _reconnect() async {
     _state.addLog('Reconnecting...');
 
-    // Try refresh token first
-    final result = await _auth.refreshAccessToken();
+    // Try full auth chain
+    final result = await _auth.ensureAuthenticated();
     if (result.requiresRepair) {
-      _state.addLog('Credentials revoked — re-pairing');
+      // Only re-pair if device was explicitly revoked by server
+      _state.addLog('Device revoked — re-pairing');
       _heartbeatTimer?.cancel();
       _farm?.dispose();
       await _creds.clear();

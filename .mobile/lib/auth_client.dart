@@ -140,7 +140,7 @@ class AuthClient {
   /// No CF headers needed (pre-auth endpoint).
   Future<AuthResult> reauth() async {
     if (credentials.nodeId == null) {
-      return AuthResult(success: false, error: 'No node_id', requiresRepair: true);
+      return AuthResult(success: false, error: 'No node_id');
     }
 
     debugPrint('[AUTH] Reauth phase 1: requesting challenge for ${credentials.nodeId}');
@@ -252,9 +252,10 @@ class AuthClient {
       debugPrint('[AUTH] Reauth failed: ${result.error}');
     }
 
-    // 4. All methods failed — need re-pair
-    debugPrint('[AUTH] All auth methods failed — re-pair required');
-    return AuthResult(success: false, error: 'All auth methods failed', requiresRepair: true);
+    // 4. All methods failed — but DON'T require re-pair unless device was revoked.
+    // Could be a network issue. Keep credentials and let the app retry.
+    debugPrint('[AUTH] All auth methods failed — will retry later');
+    return AuthResult(success: false, error: 'All auth methods failed — will retry');
   }
 
   // -----------------------------------------------------------------------
@@ -325,7 +326,7 @@ class AuthClient {
   /// Refresh expired JWT. IMPORTANT: refresh token rotates — save the new one.
   Future<AuthResult> refreshAccessToken() async {
     if (credentials.refreshToken == null) {
-      return AuthResult(success: false, error: 'No refresh token', requiresRepair: true);
+      return AuthResult(success: false, error: 'No refresh token');
     }
 
     final response = await http.post(
