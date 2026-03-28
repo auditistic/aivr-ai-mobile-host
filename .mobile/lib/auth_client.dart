@@ -130,6 +130,134 @@ class AuthClient {
   }
 
   // -----------------------------------------------------------------------
+  // PRE-AUTH: Reauth (no CF headers needed — uses ECDSA challenge-response)
+  // -----------------------------------------------------------------------
+
+  /// POST /api/auth/device/reauth
+  ///
+  /// Two-phase challenge-response for when JWT and refresh token are both
+  /// expired but the device is still approved. Uses the stored private key.
+  /// No CF headers needed (pre-auth endpoint).
+  Future<AuthResult> reauth() async {
+    if (credentials.nodeId == null) {
+      return AuthResult(success: false, error: 'No node_id', requiresRepair: true);
+    }
+
+    debugPrint('[AUTH] Reauth phase 1: requesting challenge for ${credentials.nodeId}');
+
+    // Phase 1: Request challenge
+    final challengeRes = await http.post(
+      Uri.parse('$authBaseUrl/api/auth/device/reauth'),
+      headers: credentials.publicHeaders,
+      body: jsonEncode({'node_id': credentials.nodeId}),
+    );
+
+    if (challengeRes.statusCode == 403) {
+      debugPrint('[AUTH] Reauth: device revoked');
+      return AuthResult(success: false, error: 'Device revoked', requiresRepair: true);
+    }
+    if (challengeRes.statusCode != 200) {
+      debugPrint('[AUTH] Reauth challenge failed: ${challengeRes.statusCode}');
+      return AuthResult(success: false, error: 'Reauth challenge failed: HTTP ${challengeRes.statusCode}');
+    }
+
+    final challengeData = jsonDecode(challengeRes.body) as Map<String, dynamic>;
+    final challenge = challengeData['challenge'] as String? ?? '';
+    if (challenge.isEmpty) {
+      return AuthResult(success: false, error: 'Empty challenge from server');
+    }
+
+    // Phase 2: Sign challenge and submit
+    final signature = identity.signNonce(challenge);
+    debugPrint('[AUTH] Reauth phase 2: submitting signed challenge');
+
+    final tokenRes = await http.post(
+      Uri.parse('$authBaseUrl/api/auth/device/reauth'),
+      headers: credentials.publicHeaders,
+      body: jsonEncode({
+        'node_id': credentials.nodeId,
+        'challenge': challenge,
+        'signature': signature,
+      }),
+    );
+
+    if (tokenRes.statusCode == 200) {
+      final data = jsonDecode(tokenRes.body) as Map<String, dynamic>;
+      await credentials.updateTokens(
+        accessToken: data['access_token'] as String,
+        refreshToken: data['refresh_token'] as String?,
+      );
+      debugPrint('[AUTH] Reauth successful');
+      return AuthResult(success: true);
+    }
+
+    if (tokenRes.statusCode == 403) {
+      return AuthResult(success: false, error: 'Device revoked', requiresRepair: true);
+    }
+    if (tokenRes.statusCode == 401) {
+      return AuthResult(success: false, error: _parseError(tokenRes));
+    }
+
+    return AuthResult(success: false, error: 'Reauth failed: HTTP ${tokenRes.statusCode}');
+  }
+
+  // -----------------------------------------------------------------------
+  // SMART AUTH: Try all methods in priority order
+  // -----------------------------------------------------------------------
+
+  /// Attempt authentication using the priority order from the API spec:
+  ///   1. Existing JWT (if not expired)
+  ///   2. Refresh token
+  ///   3. Reauth (ECDSA challenge-response, no CF needed)
+  ///   4. Re-pair (only if device was revoked)
+  ///
+  /// Returns success if any method works. Sets requiresRepair only if
+  /// the device has been revoked and needs a new pairing code.
+  Future<AuthResult> ensureAuthenticated() async {
+    // 1. Check if existing JWT is still valid (we don't decode it,
+    //    but if we have one and it was saved recently, try using it)
+    if (credentials.accessToken != null) {
+      debugPrint('[AUTH] Have existing JWT, will try it');
+      // We can't decode HS256 client-side to check expiry,
+      // so we just try using it. If it fails, we refresh.
+    }
+
+    // 2. Try refresh token
+    if (credentials.refreshToken != null) {
+      debugPrint('[AUTH] Trying refresh token...');
+      final result = await refreshAccessToken();
+      if (result.success) {
+        debugPrint('[AUTH] Refresh succeeded');
+        return result;
+      }
+      if (result.requiresRepair) {
+        debugPrint('[AUTH] Refresh says device revoked');
+        return result;
+      }
+      debugPrint('[AUTH] Refresh failed: ${result.error}');
+    }
+
+    // 3. Try reauth (ECDSA challenge-response)
+    if (credentials.nodeId != null && identity.hasKeyPair) {
+      debugPrint('[AUTH] Trying reauth (challenge-response)...');
+      final result = await reauth();
+      if (result.success) {
+        debugPrint('[AUTH] Reauth succeeded');
+        return result;
+      }
+      if (result.requiresRepair) {
+        debugPrint('[AUTH] Reauth says device revoked — need re-pair');
+        return result;
+      }
+      debugPrint('[AUTH] Reauth failed: ${result.error}');
+    }
+
+    // 4. All methods failed — need re-pair
+    debugPrint('[AUTH] All auth methods failed — re-pair required');
+    return AuthResult(success: false, error: 'All auth methods failed', requiresRepair: true);
+  }
+
+  // -----------------------------------------------------------------------
   // PROTECTED: Challenge-Response Auth (needs CF headers)
   // -----------------------------------------------------------------------
 

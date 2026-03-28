@@ -184,18 +184,18 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
     setState(() => _phase = _BootPhase.connecting);
     _state.addLog('Connecting to farm...');
 
-    // Only refresh token if reconnecting (not on first pair — token is fresh)
+    // Only authenticate if reconnecting (not on fresh pair — token is valid)
     if (!freshPair) {
-      final refreshResult = await _auth.refreshAccessToken();
-      if (!refreshResult.success) {
-        _state.addLog('Token refresh failed, trying challenge-response...');
-        final authResult = await _auth.authenticateWithChallenge();
-        if (authResult.requiresRepair) {
-          _state.addLog('Auth failed — re-pairing required');
-          await _creds.clear();
-          setState(() => _phase = _BootPhase.pairing);
-          return;
-        }
+      debugPrint('[BOOT] Running auth priority chain...');
+      final authResult = await _auth.ensureAuthenticated();
+      if (authResult.requiresRepair) {
+        _state.addLog('Auth failed — re-pairing required');
+        await _creds.clear();
+        setState(() => _phase = _BootPhase.pairing);
+        return;
+      }
+      if (!authResult.success) {
+        _state.addLog('Auth failed: ${authResult.error} — trying anyway');
       }
     }
 
