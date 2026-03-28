@@ -65,6 +65,10 @@ class AuthClient {
 
     final publicKey = identity.publicKeySpkiBase64;
 
+    debugPrint('[AUTH] Pairing with code: "$pairingCode" (${pairingCode.length} chars)');
+    debugPrint('[AUTH] Public key length: ${publicKey.length}');
+    debugPrint('[AUTH] POST $authBaseUrl/api/auth/device/pair');
+
     final response = await http.post(
       Uri.parse('$authBaseUrl/api/auth/device/pair'),
       headers: _withCsrf(credentials.publicHeaders),
@@ -73,6 +77,8 @@ class AuthClient {
         'pairing_code': pairingCode,
       }),
     );
+
+    debugPrint('[AUTH] Response: ${response.statusCode} ${response.body.substring(0, response.body.length.clamp(0, 200))}');
 
     if (response.statusCode == 200 || response.statusCode == 201) {
       final data = jsonDecode(response.body) as Map<String, dynamic>;

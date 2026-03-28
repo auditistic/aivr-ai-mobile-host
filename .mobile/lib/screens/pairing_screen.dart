@@ -45,7 +45,7 @@ class _PairingScreenState extends State<PairingScreen> {
 
   Future<void> _submit() async {
     final code = _controller.text.trim();
-    if (code.length != 6 || int.tryParse(code) == null) {
+    if (code.length != 6) {
       setState(() => _error = 'Enter a valid 6-digit code');
       return;
     }
