@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
+import 'package:cryptography_flutter/cryptography_flutter.dart';
 
 /// Device identity — ECDSA P-256 keypair for secure farm authentication.
 ///
@@ -10,10 +11,17 @@ import 'package:cryptography/cryptography.dart';
 ///   - Sign nonces with SHA-256 for challenge-response auth
 ///   - Private key NEVER leaves the device
 class DeviceIdentity {
-  final Ecdsa _ecdsa = Ecdsa.p256(Sha256());
+  late final Ecdsa _ecdsa;
 
   EcKeyPair? _keyPair;
   EcPublicKey? _publicKey;
+
+  DeviceIdentity() {
+    // Use FlutterCryptography for platform-native ECDSA (Android/iOS)
+    // Falls back to pure Dart on desktop
+    FlutterCryptography.enable();
+    _ecdsa = Ecdsa.p256(Sha256());
+  }
 
   /// Raw public key bytes (uncompressed point, for internal use).
   Future<List<int>> get publicKeyBytes async {
