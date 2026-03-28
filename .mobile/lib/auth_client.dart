@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'device_identity.dart';
@@ -70,12 +71,26 @@ class AuthClient {
     debugPrint('[AUTH] Public key length: ${publicKey.length}');
     debugPrint('[AUTH] POST $authBaseUrl/api/auth/device/pair');
 
+    // Detect platform for server-side display
+    String platform = 'unknown';
+    String deviceName = 'AIVR Node';
+    try {
+      if (Platform.isAndroid) { platform = 'android'; deviceName = 'Android Node'; }
+      else if (Platform.isIOS) { platform = 'ios'; deviceName = 'iPhone Node'; }
+      else if (Platform.isWindows) { platform = 'windows'; deviceName = 'Windows Node'; }
+      else if (Platform.isMacOS) { platform = 'macos'; deviceName = 'Mac Node'; }
+      else if (Platform.isLinux) { platform = 'linux'; deviceName = 'Linux Node'; }
+    } catch (_) {}
+
     final response = await http.post(
       Uri.parse('$authBaseUrl/api/auth/device/pair'),
       headers: _withCsrf(credentials.publicHeaders),
       body: jsonEncode({
         'public_key': publicKey,
         'pairing_code': pairingCode,
+        'platform': platform,
+        'device_name': deviceName,
+        'app_version': '2.1.0',
       }),
     );
 
