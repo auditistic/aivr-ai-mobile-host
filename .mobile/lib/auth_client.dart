@@ -153,8 +153,13 @@ class AuthClient {
     );
 
     if (challengeRes.statusCode == 403) {
-      debugPrint('[AUTH] Reauth: device revoked');
-      return AuthResult(success: false, error: 'Device revoked', requiresRepair: true);
+      final body = challengeRes.body;
+      if (body.contains('revoked') || body.contains('not approved')) {
+        debugPrint('[AUTH] Reauth: device revoked');
+        return AuthResult(success: false, error: 'Device revoked', requiresRepair: true);
+      }
+      debugPrint('[AUTH] Reauth challenge 403: $body');
+      return AuthResult(success: false, error: 'Reauth denied: HTTP 403');
     }
     if (challengeRes.statusCode != 200) {
       debugPrint('[AUTH] Reauth challenge failed: ${challengeRes.statusCode}');
@@ -192,12 +197,13 @@ class AuthClient {
     }
 
     if (tokenRes.statusCode == 403) {
-      return AuthResult(success: false, error: 'Device revoked', requiresRepair: true);
-    }
-    if (tokenRes.statusCode == 401) {
-      return AuthResult(success: false, error: _parseError(tokenRes));
+      final body = tokenRes.body;
+      if (body.contains('revoked') || body.contains('not approved')) {
+        return AuthResult(success: false, error: 'Device revoked', requiresRepair: true);
+      }
     }
 
+    debugPrint('[AUTH] Reauth token failed: ${tokenRes.statusCode} ${tokenRes.body}');
     return AuthResult(success: false, error: 'Reauth failed: HTTP ${tokenRes.statusCode}');
   }
 
@@ -273,7 +279,11 @@ class AuthClient {
     );
 
     if (challengeRes.statusCode == 403) {
-      return AuthResult(success: false, error: 'CF access denied — re-pair required', requiresRepair: true);
+      final body = challengeRes.body;
+      if (body.contains('revoked') || body.contains('not approved')) {
+        return AuthResult(success: false, error: 'Device revoked', requiresRepair: true);
+      }
+      return AuthResult(success: false, error: 'Challenge denied: HTTP 403');
     }
     if (challengeRes.statusCode == 401) {
       return AuthResult(success: false, error: 'JWT expired — refresh first');
@@ -311,9 +321,13 @@ class AuthClient {
     }
 
     if (tokenRes.statusCode == 403) {
-      return AuthResult(success: false, error: 'Device revoked', requiresRepair: true);
+      final body = tokenRes.body;
+      if (body.contains('revoked') || body.contains('not approved')) {
+        return AuthResult(success: false, error: 'Device revoked', requiresRepair: true);
+      }
     }
 
+    debugPrint('[AUTH] Challenge token exchange failed: ${tokenRes.statusCode} ${tokenRes.body}');
     return AuthResult(success: false, error: 'Token exchange failed: ${_parseError(tokenRes)}');
   }
 
@@ -346,14 +360,16 @@ class AuthClient {
       return AuthResult(success: true);
     }
 
-    if (response.statusCode == 401 || response.statusCode == 403) {
-      return AuthResult(
-        success: false,
-        error: 'Refresh token invalid/revoked — re-pair required',
-        requiresRepair: true,
-      );
+    // Check if device was explicitly revoked (specific error message)
+    if (response.statusCode == 403) {
+      final body = response.body;
+      if (body.contains('revoked') || body.contains('not approved')) {
+        return AuthResult(success: false, error: 'Device revoked', requiresRepair: true);
+      }
     }
 
+    // Any other failure (401 expired, 403 CF issue, etc) — just fail, don't re-pair
+    debugPrint('[AUTH] Refresh failed: ${response.statusCode} ${response.body}');
     return AuthResult(success: false, error: 'Refresh failed: HTTP ${response.statusCode}');
   }
 
