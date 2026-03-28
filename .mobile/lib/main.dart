@@ -162,8 +162,8 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
         _state.addLog('Paired! Node: ${_creds.nodeId}');
         _state.addLog('Farm: ${_creds.farmName} (${_creds.farmEndpoint})');
 
-        // Transition to connecting
-        await _connectToFarm();
+        // Transition to connecting — skip token refresh, we just got fresh creds
+        await _connectToFarm(freshPair: true);
         return PairingResult(success: true);
       }
 
@@ -178,20 +178,22 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
   // Farm connection
   // -----------------------------------------------------------------------
 
-  Future<void> _connectToFarm() async {
+  Future<void> _connectToFarm({bool freshPair = false}) async {
     setState(() => _phase = _BootPhase.connecting);
     _state.addLog('Connecting to farm...');
 
-    // Ensure we have a valid token — try refresh first
-    final refreshResult = await _auth.refreshAccessToken();
-    if (!refreshResult.success) {
-      _state.addLog('Token refresh failed, trying challenge-response...');
-      final authResult = await _auth.authenticateWithChallenge();
-      if (authResult.requiresRepair) {
-        _state.addLog('Auth failed — re-pairing required');
-        await _creds.clear();
-        setState(() => _phase = _BootPhase.pairing);
-        return;
+    // Only refresh token if reconnecting (not on first pair — token is fresh)
+    if (!freshPair) {
+      final refreshResult = await _auth.refreshAccessToken();
+      if (!refreshResult.success) {
+        _state.addLog('Token refresh failed, trying challenge-response...');
+        final authResult = await _auth.authenticateWithChallenge();
+        if (authResult.requiresRepair) {
+          _state.addLog('Auth failed — re-pairing required');
+          await _creds.clear();
+          setState(() => _phase = _BootPhase.pairing);
+          return;
+        }
       }
     }
 
