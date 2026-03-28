@@ -22,20 +22,52 @@ class AuthClient {
     required this.credentials,
   });
 
+  // CSRF token (fetched before POST requests if server requires it)
+  String? _csrfToken;
+
+  // -----------------------------------------------------------------------
+  // CSRF handling
+  // -----------------------------------------------------------------------
+
+  /// Fetch CSRF token from the auth server.
+  /// Tries GET /api/auth/csrf or /api/csrf — common patterns.
+  Future<void> _fetchCsrfToken() async {
+    try {
+      final response = await http.get(
+        Uri.parse('$authBaseUrl/api/auth/csrf'),
+        headers: credentials.publicHeaders,
+      );
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        _csrfToken = data['csrfToken'] as String? ?? data['token'] as String?;
+      }
+    } catch (_) {
+      // CSRF not required — continue without it
+    }
+  }
+
+  /// Add CSRF token to headers if available.
+  Map<String, String> _withCsrf(Map<String, String> headers) {
+    if (_csrfToken != null) {
+      return {...headers, 'X-CSRF-Token': _csrfToken!};
+    }
+    return headers;
+  }
+
   // -----------------------------------------------------------------------
   // PRE-AUTH: Pairing (no CF headers needed)
   // -----------------------------------------------------------------------
 
   /// POST /api/auth/device/pair
-  ///
-  /// Register device public key with a 6-digit pairing code from user's profile.
-  /// On success, returns node_id, tokens, CF credentials, and farm endpoint.
   Future<PairResult> pair(String pairingCode) async {
+    // Fetch CSRF token first if needed
+    await _fetchCsrfToken();
+
     final publicKey = identity.publicKeySpkiBase64;
 
     final response = await http.post(
       Uri.parse('$authBaseUrl/api/auth/device/pair'),
-      headers: credentials.publicHeaders,
+      headers: _withCsrf(credentials.publicHeaders),
       body: jsonEncode({
         'public_key': publicKey,
         'pairing_code': pairingCode,

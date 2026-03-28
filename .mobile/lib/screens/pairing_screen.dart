@@ -73,11 +73,11 @@ class _PairingScreenState extends State<PairingScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFF0A0A0A),
       body: SafeArea(
-        child: Padding(
+        child: SingleChildScrollView(
           padding: const EdgeInsets.all(32),
           child: Column(
             children: [
-              const Spacer(flex: 2),
+              const SizedBox(height: 40),
               // Icon
               Container(
                 width: 80,
@@ -205,7 +205,7 @@ class _PairingScreenState extends State<PairingScreen> {
                         ),
                 ),
               ),
-              const Spacer(flex: 3),
+              const SizedBox(height: 40),
             ],
           ),
         ),
