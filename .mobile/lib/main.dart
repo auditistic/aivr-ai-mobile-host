@@ -86,6 +86,7 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
   Future<void> _boot() async {
     // 1. Load stored credentials
     await _creds.load();
+    debugPrint('[BOOT] isPaired=${_creds.isPaired} hasCredentials=${_creds.hasCredentials} nodeId=${_creds.nodeId} farmEndpoint=${_creds.farmEndpoint}');
 
     // 2. Auth client
     _auth = AuthClient(
@@ -136,6 +137,7 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
     }
 
     // 8. Check if already paired
+    debugPrint('[BOOT] Decision: isPaired=${_creds.isPaired} hasCredentials=${_creds.hasCredentials} cfClientId=${_creds.cfClientId != null} accessToken=${_creds.accessToken != null}');
     if (_creds.isPaired && _creds.hasCredentials) {
       _state.nodeId = _creds.nodeId ?? '';
       _state.farmGatewayUrl = _creds.farmEndpoint;

@@ -34,24 +34,23 @@ class CredentialStore {
   bool isPaired = false;
 
   bool get hasCredentials =>
-      nodeId != null &&
-      accessToken != null &&
-      cfClientId != null &&
-      cfClientSecret != null;
+      nodeId != null && nodeId!.isNotEmpty &&
+      accessToken != null && accessToken!.isNotEmpty;
 
   bool get hasFarmEndpoint => farmEndpoint != null && farmEndpoint!.isNotEmpty;
 
   /// Load all credentials from storage.
+  /// Treats empty strings as null.
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
-    nodeId = prefs.getString(_kNodeId);
-    fingerprint = prefs.getString(_kFingerprint);
-    accessToken = prefs.getString(_kAccessToken);
-    refreshToken = prefs.getString(_kRefreshToken);
-    cfClientId = prefs.getString(_kCfClientId);
-    cfClientSecret = prefs.getString(_kCfClientSecret);
-    farmId = prefs.getString(_kFarmId);
-    farmName = prefs.getString(_kFarmName);
+    nodeId = _nonEmpty(prefs.getString(_kNodeId));
+    fingerprint = _nonEmpty(prefs.getString(_kFingerprint));
+    accessToken = _nonEmpty(prefs.getString(_kAccessToken));
+    refreshToken = _nonEmpty(prefs.getString(_kRefreshToken));
+    cfClientId = _nonEmpty(prefs.getString(_kCfClientId));
+    cfClientSecret = _nonEmpty(prefs.getString(_kCfClientSecret));
+    farmId = _nonEmpty(prefs.getString(_kFarmId));
+    farmName = _nonEmpty(prefs.getString(_kFarmName));
     farmEndpoint = prefs.getString(_kFarmEndpoint);
     isPaired = prefs.getBool(_kPaired) ?? false;
 
@@ -157,4 +156,7 @@ class CredentialStore {
     keyMaterial = null;
     isPaired = false;
   }
+
+  /// Returns null if string is null or empty.
+  static String? _nonEmpty(String? s) => (s != null && s.isNotEmpty) ? s : null;
 }
