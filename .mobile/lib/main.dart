@@ -73,6 +73,7 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
   late final FarmCommandHandler _commandHandler;
   FarmConnection? _farm;
   Timer? _heartbeatTimer;
+  Timer? _autoRetryTimer;
 
   _BootPhase _phase = _BootPhase.loading;
 
@@ -136,13 +137,15 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
       _state.addLog('Wake lock enabled');
     }
 
-    // 8. Check if already paired
-    debugPrint('[BOOT] Decision: isPaired=${_creds.isPaired} hasCredentials=${_creds.hasCredentials} cfClientId=${_creds.cfClientId != null} accessToken=${_creds.accessToken != null}');
-    if (_creds.isPaired && _creds.hasCredentials) {
+    // 8. Check if already paired — go straight to dashboard
+    debugPrint('[BOOT] isPaired=${_creds.isPaired} hasCredentials=${_creds.hasCredentials}');
+    if (_creds.isPaired) {
       _state.nodeId = _creds.nodeId ?? '';
       _state.farmGatewayUrl = _creds.farmEndpoint;
       _state.addLog('Device paired as ${_creds.nodeId}');
-      await _connectToFarm();
+      setState(() => _phase = _BootPhase.dashboard);
+      // Connect in background — don't block the UI
+      _connectToFarm();
     } else {
       setState(() => _phase = _BootPhase.pairing);
     }
@@ -181,28 +184,27 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
   // -----------------------------------------------------------------------
 
   Future<void> _connectToFarm({bool freshPair = false}) async {
-    setState(() => _phase = _BootPhase.connecting);
-    _state.addLog('Connecting to farm...');
+    // Always show dashboard — connection status is visible there
+    if (_phase != _BootPhase.dashboard) {
+      setState(() => _phase = _BootPhase.dashboard);
+    }
 
-    // Only authenticate if reconnecting (not on fresh pair — token is valid)
+    // Authenticate (unless fresh pair — token is already valid)
     if (!freshPair) {
-      debugPrint('[BOOT] Running auth priority chain...');
+      _state.addLog('Authenticating...');
       final authResult = await _auth.ensureAuthenticated();
       if (authResult.requiresRepair) {
-        // ONLY clear creds if server explicitly said device is revoked (403)
         _state.addLog('Device revoked by server — re-pairing required');
         await _creds.clear();
         setState(() => _phase = _BootPhase.pairing);
         return;
       }
       if (!authResult.success) {
-        // Auth failed (network error, etc) — DON'T clear creds, just proceed
-        // The farm connection will retry and we'll re-auth later
-        _state.addLog('Auth: ${authResult.error} — proceeding with cached token');
+        _state.addLog('Auth: ${authResult.error} — using cached token');
       }
     }
 
-    // Create farm connection with token + CF headers
+    // Create farm connection
     final farmUrl = _creds.farmEndpoint ?? 'wss://farm.aivr.site/ws';
 
     _farm = FarmConnection(
@@ -215,10 +217,20 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
 
     await _farm!.connect();
 
-    // Start auth server heartbeat (30-60s per spec)
+    // Start heartbeat + auto-retry timer
     _startHeartbeat();
+    _startAutoRetry();
+  }
 
-    setState(() => _phase = _BootPhase.dashboard);
+  /// Auto-retry connection every 60 seconds if disconnected.
+  void _startAutoRetry() {
+    _autoRetryTimer?.cancel();
+    _autoRetryTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+      if (_state.connectionState != FarmConnectionState.connected) {
+        _state.addLog('Auto-retry: reconnecting...');
+        _reconnect();
+      }
+    });
   }
 
   void _startHeartbeat() {
@@ -247,23 +259,23 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
   void _reconnect() async {
     _state.addLog('Reconnecting...');
 
-    // Try full auth chain
+    // Try auth chain
     final result = await _auth.ensureAuthenticated();
+    if (result.success) {
+      _farm?.authToken = _creds.accessToken;
+    }
+    // Only re-pair if explicitly revoked
     if (result.requiresRepair) {
-      // Only re-pair if device was explicitly revoked by server
       _state.addLog('Device revoked — re-pairing');
       _heartbeatTimer?.cancel();
+      _autoRetryTimer?.cancel();
       _farm?.dispose();
       await _creds.clear();
       setState(() => _phase = _BootPhase.pairing);
       return;
     }
 
-    // Update farm connection token
-    if (result.success) {
-      _farm?.authToken = _creds.accessToken;
-    }
-
+    // Reconnect WebSocket
     await _farm?.disconnect();
     await _farm?.connect();
   }
@@ -285,6 +297,7 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _heartbeatTimer?.cancel();
+    _autoRetryTimer?.cancel();
     _farm?.dispose();
     _cactusLM.unload();
     if (DeviceDetector.isMobile) WakelockPlus.disable();
@@ -300,19 +313,17 @@ class _NodeBootstrapState extends State<NodeBootstrap> with WidgetsBindingObserv
     switch (_phase) {
       case _BootPhase.loading:
       case _BootPhase.connecting:
-        return Scaffold(
-          backgroundColor: const Color(0xFF0A0A0A),
+        return const Scaffold(
+          backgroundColor: Color(0xFF0A0A0A),
           body: Center(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const CircularProgressIndicator(color: Color(0xFF22C55E)),
-                const SizedBox(height: 24),
+                CircularProgressIndicator(color: Color(0xFF22C55E)),
+                SizedBox(height: 24),
                 Text(
-                  _phase == _BootPhase.connecting
-                      ? 'CONNECTING TO FARM...'
-                      : 'INITIALIZING NODE...',
-                  style: const TextStyle(
+                  'INITIALIZING NODE...',
+                  style: TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.w900,
                     color: Colors.white54,
