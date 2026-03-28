@@ -71,12 +71,12 @@ class DeviceIdentity {
     _keyPair = keyPair;
     _publicKey = await keyPair.extractPublicKey();
 
-    // Extract for storage
-    final d = await keyPair.extractPrivateKeyBytes();
+    // Extract private key data for storage
+    final extracted = await keyPair.extract();
     final pk = _publicKey!;
 
     return KeyMaterial(
-      privateKeyD: base64Encode(d),
+      privateKeyD: base64Encode(Uint8List.fromList(extracted.d)),
       publicKeyX: base64Encode(Uint8List.fromList(pk.x)),
       publicKeyY: base64Encode(Uint8List.fromList(pk.y)),
       publicKeySpki: await publicKeySpkiBase64,
