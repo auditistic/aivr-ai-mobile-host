@@ -23,4 +23,12 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     spdlog::spdlog
 )
 
+# Testing
+enable_testing()
+
+add_executable(test_mobile_bridge tests/test_mobile_bridge.cpp)
+target_link_libraries(test_mobile_bridge PRIVATE ${PROJECT_NAME})
+
+add_test(NAME MobileStatusTest COMMAND test_mobile_bridge)
+
 install(TARGETS ${PROJECT_NAME} DESTINATION lib)
