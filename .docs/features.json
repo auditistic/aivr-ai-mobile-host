@@ -129,25 +129,26 @@
                 "status": "COMPLETED"
             },
             {
-                "name": "PLATFORM.MACOS",
-                "description": "macOS support: Flutter GUI or headless CLI, Apple Neural Engine detection.",
-                "status": "COMPLETED"
-            },
-            {
                 "name": "PLATFORM.LINUX",
                 "description": "Linux support: Flutter GUI or headless CLI, NVIDIA/Intel NPU detection, systemd/Docker friendly.",
                 "status": "COMPLETED"
             },
             {
                 "name": "PLATFORM.IOS",
-                "description": "iOS support.",
-                "status": "NOT_IMPLEMENTED"
+                "description": "iOS / iPhone support — coming soon. Flutter build target is in the repo; pending App Store packaging.",
+                "status": "COMING_SOON"
+            },
+            {
+                "name": "PLATFORM.MACOS",
+                "description": "macOS / Mac support — coming soon. Flutter build target is in the repo; pending notarization.",
+                "status": "COMING_SOON"
             }
         ]
     },
     "statusDefinitions": {
         "COMPLETED": "Production ready, fully working.",
         "PARTIAL": "Some parts working; not fully completed or validated.",
+        "COMING_SOON": "Build target exists, release pending packaging/notarization.",
         "NOT_IMPLEMENTED": "No working code/path available."
     }
 }

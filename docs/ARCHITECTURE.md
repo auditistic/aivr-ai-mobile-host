@@ -98,11 +98,11 @@ All messages are JSON over WebSocket.
 
 | Platform | Status | Compute | Mode |
 |----------|--------|---------|------|
-| Android | Supported | Qualcomm NPU/Adreno GPU/ARM CPU | Flutter GUI + wake lock |
-| iOS | Planned | Apple Neural Engine | Flutter GUI |
-| Windows | Supported | Intel NPU, NVIDIA/AMD GPU, CPU | Flutter GUI or headless CLI |
-| macOS | Supported | Apple Neural Engine / Metal | Flutter GUI or headless CLI |
-| Linux | Supported | NVIDIA GPU, Intel NPU, CPU | Flutter GUI or headless CLI |
+| Android | **Supported** | Qualcomm NPU/Adreno GPU/ARM CPU | Flutter GUI + wake lock |
+| Windows (PC) | **Supported** | Intel NPU, NVIDIA/AMD GPU, CPU | Flutter GUI or headless CLI |
+| Linux | **Supported** | NVIDIA GPU, Intel NPU, CPU | Flutter GUI or headless CLI |
+| iPhone (iOS) | _Coming Soon_ | Apple Neural Engine | Flutter GUI |
+| Mac (macOS) | _Coming Soon_ | Apple Neural Engine / Metal | Flutter GUI or headless CLI |
 
 ### Desktop Modes
 

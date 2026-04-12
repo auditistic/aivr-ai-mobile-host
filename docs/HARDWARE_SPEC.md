@@ -1,13 +1,37 @@
-# AI-Mobile-Host — HARDWARE_SPEC.md
+# AIVR Node — HARDWARE_SPEC.md
 
-## 1. System Requirements (Android)
+## Platform Support Matrix
+
+| Platform | Status |
+|----------|--------|
+| Android | **Supported** |
+| Windows (PC) | **Supported** |
+| Linux | **Supported** |
+| iPhone (iOS) | _Coming Soon_ |
+| Mac (macOS) | _Coming Soon_ |
+
+## 1. System Requirements (Android) — Supported
 - **OS:** Android 11.0+.
 - **Chip:** ARMv8 (64-bit) required for C++ core performance.
 - **Sensors:** Accelerometer/Gyroscope (Required for tracking).
 
-## 2. System Requirements (iOS)
+## 2. System Requirements (Windows PC) — Supported
+- **OS:** Windows 10 64-bit or newer.
+- **Compute:** Intel NPU, NVIDIA/AMD GPU, or x86_64 CPU.
+
+## 3. System Requirements (Linux) — Supported
+- **OS:** glibc 2.31+ (Ubuntu 20.04+, Debian 11+, Fedora 34+).
+- **Compute:** NVIDIA GPU (CUDA 11+), Intel NPU, or x86_64/ARM64 CPU.
+
+## 4. System Requirements (iPhone / iOS) — Coming Soon
 - **OS:** iOS 15.0+.
 - **Hardware:** iPhone 12 or newer recommended for neural engine support.
+- _Build target exists in the repo; official release pending App Store packaging._
+
+## 5. System Requirements (Mac / macOS) — Coming Soon
+- **OS:** macOS 12 (Monterey) or newer.
+- **Hardware:** Apple Silicon (M1/M2/M3) recommended; Intel Macs supported with reduced NPU capability.
+- _Build target exists in the repo; official release pending notarization._
 
 ## 3. Memory (RAM)
 - **Usage:** < 256MB active.

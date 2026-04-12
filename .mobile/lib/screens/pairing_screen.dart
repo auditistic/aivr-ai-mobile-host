@@ -205,11 +205,84 @@ class _PairingScreenState extends State<PairingScreen> {
                         ),
                 ),
               ),
-              const SizedBox(height: 40),
+              const SizedBox(height: 32),
+              // Supported platforms footer
+              _buildPlatformSupport(),
+              const SizedBox(height: 24),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildPlatformSupport() {
+    const supported = [
+      ('ANDROID', true),
+      ('PC', true),
+      ('LINUX', true),
+      ('iPHONE', false),
+      ('MAC', false),
+    ];
+
+    return Column(
+      children: [
+        Text(
+          'SUPPORTED PLATFORMS',
+          style: TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.w900,
+            color: Colors.grey[600],
+            letterSpacing: 2,
+          ),
+        ),
+        const SizedBox(height: 12),
+        Wrap(
+          alignment: WrapAlignment.center,
+          spacing: 8,
+          runSpacing: 8,
+          children: supported.map((entry) {
+            final (name, isSupported) = entry;
+            final color = isSupported
+                ? const Color(0xFF22C55E)
+                : Colors.grey[700]!;
+            return Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: color.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: color.withOpacity(0.4)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    name,
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w900,
+                      color: color,
+                      letterSpacing: 1,
+                    ),
+                  ),
+                  if (!isSupported) ...[
+                    const SizedBox(width: 6),
+                    Text(
+                      'SOON',
+                      style: TextStyle(
+                        fontSize: 8,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.grey[500],
+                        letterSpacing: 1,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            );
+          }).toList(),
+        ),
+      ],
     );
   }
 }

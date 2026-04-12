@@ -1,174 +1,97 @@
-
 ![aivr-mobile-node.png](images/aivr-mobile-node.png)
-# Cactus OpenAI Server
+# AIVR - Node
 
-Turn your Android phone into a high-performance OpenAI-compatible API server using Cactus LLM engine. Get 16-75 tok/s local inference with full /v1/chat/completions endpoint.
+A dedicated distributed-inference worker node for the AIVR AI Farm. Pair any supported device to the farm with a 6-digit code and start earning tokens by contributing its compute to the mesh.
 
-## System Overview
-AIVR-AI-Mobile-Host integrates mobile devices as distributed inference nodes within the AIVR grid. By leveraging the Neural Processing Units (NPUs) in modern smartphones (Pixel, Samsung, iPhone), this system offloads lighter AI tasks from the main servers. It turns otherwise idle phones into active "neurons" that can handle chat completions, summarization, or simple logic tasks, reducing the load on the central GPUs.
+## Supported Platforms
 
-This component is crucial for the "Ubiquitous AI" vision of AIVR, ensuring that intelligence is not just centralized in a rack server but distributed across the physical environment. It adds resilience and scalability to the system, allowing for edge computing capabilities that are accessible via standard OpenAI APIs.
+| Platform | Status |
+|----------|--------|
+| **Android** | Supported |
+| **Windows (PC)** | Supported |
+| **Linux** | Supported |
+| **iPhone (iOS)** | Coming Soon |
+| **Mac (macOS)** | Coming Soon |
+
+Any old phone, a spare Linux box, or your Windows gaming PC can be turned into a token-earning farm node. iPhone and Mac builds are in final packaging — coming soon.
+
+## How It Works
+
+1. **Install** AIVR - Node on your device
+2. **Pair** it with a 6-digit code from [auth.aivr.site](https://auth.aivr.site) → Profile → Devices
+3. **Connect** the node authenticates via ECDSA P-256 challenge and joins the farm through the Cloudflare gateway
+4. **Earn** the farm dispatches inference work; tokens accumulate as your device processes requests
+5. **Spend or trade** tokens power your own AI usage or trade them on the token exchange
+
+## Status Dashboard
+
+The app is headless-ready with a single read-only status screen showing:
+- Connection state + farm gateway endpoint
+- Node ID and platform
+- Active model + compute unit (NPU / GPU / CPU)
+- Live token earnings counter
+- Tokens in/out, request count, current tok/s
+- Activity log
+
+No user configuration, no model pickers, no manual controls — the farm orchestrates everything.
+
+## Architecture
+
+```
+┌──────────────┐        WSS + JWT        ┌──────────────────┐
+│  AIVR Node   │ ───────────────────────▶│  Cloudflare GW   │
+│ (this repo)  │ ◀─── commands, work ────│  + AIVR Farm     │
+└──────────────┘                          └──────────────────┘
+       │
+       ├─ Ed25519/ECDSA keypair (device identity)
+       ├─ Cactus LLM inference engine
+       └─ Platform-specific compute detection
+```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
+
+## Build & Deploy
+
+### Android
+```powershell
+cd .mobile
+flutter pub get
+flutter build apk --release
+adb install build\app\outputs\flutter-apk\app-release.apk
+```
+
+### Windows / Linux (Flutter GUI)
+```bash
+cd .mobile
+flutter pub get
+flutter run -d windows   # or: flutter run -d linux
+```
+
+### Headless (servers, Docker, systemd)
+```bash
+cd .mobile
+dart run lib/main_headless.dart
+# or with custom farm:
+AIVR_FARM_URL=wss://custom.farm/ws/node dart run lib/main_headless.dart
+```
+
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for setup, [docs/OPERATIONS.md](docs/OPERATIONS.md) for deployment.
+
+## Token Economy
+
+Users earn tokens by contributing their device's compute to the farm. Earned tokens can be:
+- **Spent** on their own AI usage through AIVR
+- **Traded** on the AIVR token exchange
+
+The more compute you contribute (bigger NPU, better GPU, more uptime) the more tokens you earn.
 
 ## System Integrations
-This mobile mesh connects directly to the core orchestration and service layers.
-- [AIVR-App-Wifi-Mesh](../AIVR-App-Wifi-Mesh/README.md): Ensures the consistent low-latency network connectivity required for these mobile nodes to respond quickly.
-- [AIVR-AI-Orchestrator](../AIVR-AI-Orchestrator/README.md): Dispatches small, latency-tolerant tasks to these mobile nodes when the main cluster is busy.
-- [AIVR-Service-Relay](../AIVR-Service-Relay/README.md): Proxies requests from the public internet to these local mobile endpoints securely.
-- [AIVR-Host-Setup](../AIVR-Host-Setup/README.md): Configures the DHCP reservations to ensure these phones have static IPs for reliable API access.
-- [AIVR-AI-Worker](../AIVR-AI-Worker/README.md): Can fallback to these mobile nodes if the primary high-end models are unavailable.
 
-## Why This Exists
-
-You probably found this repo because you, like me, realized nobody had built the obvious thing: **a phone-based LLM server with Cactus's ARM-tuned kernels AND OpenAI's API**.
-
-- Cactus gives you 2-10× the speed of generic llama.cpp/Ollama on phones
-- OpenAI API lets any tool (n8n, LangChain, etc.) talk to your phone without custom clients
-- This repo is the missing piece
-
-## Performance
-
-| Device Type | Expected Speed (Qwen3-0.6B INT8) |
-|-------------|----------------------------------|
-| Pixel 6a, Galaxy S21, iPhone 11 | 16-20 tok/s |
-| Pixel 9, Galaxy S25, iPhone 16 Pro | 50-70 tok/s |
-| iPhone 17 Pro (flagships) | 75+ tok/s |
-
-## Setup for Your Two Android Phones
-
-### Prerequisites
-- Windows PC with Flutter + Android Studio installed
-- Two Android phones on same Wi-Fi
-- USB cables for both phones
-
-### Step 1: Install Flutter (One-Time)
-
-```powershell
-# Download Flutter SDK from flutter.dev
-# Extract to C:\src\flutter
-# Add to PATH: C:\src\flutter\bin
-
-# Verify install
-flutter doctor
-
-# Install Android Studio if prompted
-# Accept Android licenses
-flutter doctor --android-licenses
-```
-
-### Step 2: Clone & Build
-
-```powershell
-git clone https://github.com/AudiTistic/cactus-openai-server.git
-cd cactus-openai-server
-
-# Get dependencies
-flutter pub get
-
-# Build release APK
-flutter build apk --release
-```
-
-APK will be in `build/app/outputs/flutter-apk/app-release.apk`
-
-### Step 3: Install on Both Phones
-
-**Option A: USB Install**
-```powershell
-# Enable Developer Options + USB Debugging on both phones
-# Connect Phone 1 via USB
-flutter devices  # Verify it shows up
-flutter install  # Or: adb install build/app/outputs/flutter-apk/app-release.apk
-
-# Repeat for Phone 2
-```
-
-**Option B: File Transfer**
-- Copy `app-release.apk` to each phone
-- Open file manager, tap APK, install
-
-### Step 4: Run Server on Each Phone
-
-1. Open "Cactus OpenAI Server" app on both phones
-2. App displays server URL: `http://192.168.x.x:8080/v1/chat/completions`
-3. Tap "Start Server" on each
-4. Note each phone's IP (Phone 1: 192.168.1.100, Phone 2: 192.168.1.101, for example)
-
-### Step 5: Test from Your PC
-
-```python
-from openai import OpenAI
-
-# Test Phone 1
-client1 = OpenAI(
-    base_url="http://192.168.1.100:8080/v1",
-    api_key="local-key",  # Any value works
-)
-
-response = client1.chat.completions.create(
-    model="cactus-default",
-    messages=[{"role": "user", "content": "Hello from phone 1"}],
-    max_tokens=100,
-)
-print(response.choices[0].message.content)
-
-# Repeat for Phone 2 with its IP
-```
-
-### Step 6: Keep Phones Awake
-
-- Disable battery optimization for the app
-- Keep phones plugged in
-- Set screen timeout to max or use "Stay awake while charging" in Developer Options
-
-## Using with n8n, LangChain, etc.
-
-Any tool that accepts custom OpenAI endpoints works. Just set:
-- Base URL: `http://<phone-ip>:8080/v1`
-- API Key: any non-empty string
-- Model: `cactus-default`
-
-**Example: Load-balance across both phones**
-```python
-import random
-from openai import OpenAI
-
-phones = ["192.168.1.100", "192.168.1.101"]
-
-def get_client():
-    ip = random.choice(phones)
-    return OpenAI(base_url=f"http://{ip}:8080/v1", api_key="local")
-
-# Now your agents automatically round-robin between phones
-client = get_client()
-```
-
-## Supported Endpoints
-
-- `POST /v1/chat/completions` - OpenAI chat format
-- `GET /v1/models` - List available models
-- `GET /` - Health check
-
-## FAQ
-
-**Q: Do I need a Cactus telemetry token?**  
-A: Not for basic testing. For production, uncomment the `CactusConfig` line in `main.dart` and add your token.
-
-**Q: Can I use different models?**  
-A: Cactus auto-downloads small models on first run. For custom models, see [Cactus docs](https://pub.dev/packages/cactus).
-
-**Q: Why not just use Ollama on Termux?**  
-A: Cactus is 2-10× faster on the same hardware due to ARM-specific kernels. If you're okay with ~3 tok/s, Ollama is easier.
-
-**Q: Can I run this on iOS?**  
-A: Yes, but you need a Mac to build. Change `flutter build apk` to `flutter build ios` and use Xcode to deploy.
-
-## Contributing
-
-PRs welcome. Focus areas:
-- Streaming support (`/v1/chat/completions` with SSE)
-- Model selection UI
-- Battery optimization profiles
+- [AIVR-SSO-OAuth](https://auth.aivr.site) — device pairing & JWT auth
+- AIVR Farm Gateway — WebSocket command/response channel
+- AIVR-AI-Orchestrator — dispatches inference work to paired nodes
+- AIVR Token Exchange — credits earned tokens to the user's balance
 
 ## License
 
-MIT - do whatever you want with this.
+MIT.
